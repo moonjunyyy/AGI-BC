@@ -1,64 +1,111 @@
-import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from kobert import get_pytorch_kobert_model
-from kobert import get_tokenizer
-from gluonnlp.data import SentencepieceTokenizer
 
 class BPM_ST(nn.Module):
-    def __init__(self, hidden_size=128, num_classes=2, dr_rate=None, params=None):
+    def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None, output_size=128, dropout=0.3):
         super(BPM_ST, self).__init__()
-        self.tokenizer = SentencepieceTokenizer(get_tokenizer())
-        self.bert, self.vocab = get_pytorch_kobert_model()
-        for param in self.bert.parameters():
-            param.requires_grad = False
 
-        self.dr_rate = dr_rate
+        # get the bert model and tokenizer from arguments        
+        # tokenizer = SentencepieceTokenizer(get_tokenizer())
+        # bert, vocab = get_pytorch_kobert_model()
+        self.bert = bert
+        self.vocab = vocab
+        self.tokenizer = tokenizer
+        # if bert and vocab are not provided, raise an error
+        assert self.bert is not None and self.vocab is not None, "bert and vocab must be provided"
+        
+        # define the MFCC extractor
+        # self.mfcc_extractor = MFCC(sample_rate=sample_rate,n_mfcc=13)
+        self.mfcc_extractor = mfcc_extractor
+        self.audio_feature_size = mfcc_extractor.n_mfcc
 
-        self.LSTM = nn.LSTM(input_size=13, hidden_size=13, num_layers=1, batch_first=True, bidirectional=True)
-        self.fc_layer = nn.Linear(781, hidden_size)
-        self.classifier = nn.Linear(hidden_size, num_classes)
+        self.dropout = nn.Dropout(dropout)
+
+        # define the LSTM layer, 4 of layers
+        self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=4, batch_first=True, bidirectional=True)
+
+        # FC layer that has 128 of nodes which fed concatenated feature of audio and text
+        self.fc_layer = nn.Linear(768 + self.audio_feature_size, output_size)
 
     def forward(self, x):
         audio = x["audio"]
         text  = x["text"]
-        y = {}
 
-        audio = self.LSTM(audio)
-        _, text  = self.bert(self.vocab(self.tokenizer(text)))
+        # tokenize the text if tokenizer is provided
+        if self.tokenizer is not None:
+            text = self.tokenizer(text)
+        # convert the text to index
+        text = self.vocab(text)
+        # extract the text feature from bert model
+        _, text = self.bert(text)
+        y = {}
+        
+        # extract the MFCC feature from audio
+        audio = self.mfcc_extractor(audio)
+        # reshape the MFCC feature to (batch_size, length, 13)
+        audio = audio.permute(0, 2, 1)
+        # pass the MFCC feature to LSTM layer
+        audio, _ = self.LSTM(self.dropout(audio))
+
+        # concatenate the audio and text feature
         x = torch.cat((audio, text), dim=1)
-        x = self.fc_layer(x)
-        y["logit"] = self.classifier(x)
+        # pass the concatenated feature to FC layer
+        y["logit"] = self.fc_layer(self.dropout(x))
+        
         return y
 
 class BPM_MT(nn.Module):
-    def __init__(self, hidden_size=128, sentiment_hidden_size=64, num_classes=2, dr_rate=None, params=None):
-        super(BPM_MT, self).__init__()
+    def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None, output_size=128, sentiment_output_size=64, dropout=0.3):
+        super(BPM_ST, self).__init__()
 
-        self.tokenizer = SentencepieceTokenizer(get_tokenizer())
-        self.model, self.vocab = get_pytorch_kobert_model()
-        for param in self.model.parameters():
-            param.requires_grad = False
-                
-        self.fc_layer = nn.Linear(781, hidden_size)
-        self.classifier = nn.Linear(hidden_size, num_classes)
-
-        self.sentiment_fc_layer = nn.Linear(781, sentiment_hidden_size)
-        self.sentiment_classifier = nn.Linear(sentiment_hidden_size, 1)
+        # get the bert model and tokenizer from arguments        
+        # tokenizer = SentencepieceTokenizer(get_tokenizer())
+        # bert, vocab = get_pytorch_kobert_model()
+        self.bert = bert
+        self.vocab = vocab
+        self.tokenizer = tokenizer
+        # if bert and vocab are not provided, raise an error
+        assert self.bert is not None and self.vocab is not None, "bert and vocab must be provided"
         
+        # define the MFCC extractor
+        # self.mfcc_extractor = MFCC(sample_rate=sample_rate,n_mfcc=13)
+        self.mfcc_extractor = mfcc_extractor
+        self.audio_feature_size = mfcc_extractor.n_mfcc
+
+        # define the LSTM layer, 4 of layers
+        self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=4, batch_first=True, bidirectional=True)
+
+        self.dropout = nn.Dropout(dropout)
+        # FC layer that has 128 of nodes which fed concatenated feature of audio and text
+        self.fc_layer = nn.Linear(768 + self.audio_feature_size, output_size)
+        self.sentiment_fc_layer = nn.Linear(768, sentiment_output_size)
+
     def forward(self, x):
         audio = x["audio"]
         text  = x["text"]
+        
+        # tokenize the text if tokenizer is provided
+        if self.tokenizer is not None:
+            text = self.tokenizer(text)
+        # convert the text to index
+        text = self.vocab(text)
+        # extract the text feature from bert model
+        _, text = self.bert(text)
         y = {}
+        
+        # extract the MFCC feature from audio
+        audio = self.mfcc_extractor(audio)
+        # reshape the MFCC feature to (batch_size, length, 13)
+        audio = audio.permute(0, 2, 1)
+        # pass the MFCC feature to LSTM layer
+        audio, _ = self.LSTM(audio)
 
-        audio = self.LSTM(audio)
-        _, text  = self.model(self.vocab(self.tokenizer(text)))
+        # concatenate the audio and text feature
         x = torch.cat((audio, text), dim=1)
-        x = self.fc_layer(x)
-        y["logit"] = self.classifier(x)
+        # pass the concatenated feature to FC layer
+        y["logit"] = self.fc_layer(self.dropout(x))
 
-        x = self.sentiment_fc_layer(text)
-        y["sentiment"] = self.sentiment_classifier(x)
+        # pass the concatenated feature to sentiment FC layer
+        y["sentiment"] = self.sentiment_fc_layer(self.dropout(text))
+        
         return y
