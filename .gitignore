@@ -1,3 +1,5 @@
 .cache/*
 data/*
 __pycache__/*
+*.out
+test.py
