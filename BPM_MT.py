@@ -82,7 +82,7 @@ class BPM_MT(nn.Module):
         self.audio_feature_size = mfcc_extractor.n_mfcc
 
         # define the LSTM layer, 4 of layers
-        self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=4, batch_first=True, bidirectional=True)
+        self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=6, batch_first=True, bidirectional=True)
 
         self.dropout = nn.Dropout(dropout)
         # FC layer that has 128 of nodes which fed concatenated feature of audio and text
