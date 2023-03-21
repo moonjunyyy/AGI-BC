@@ -13,6 +13,7 @@ def main():
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument('--is_MT', type=bool, default=is_MT)
+    parser.add_argument('--language', type=str, default='ko')
     parser.add_argument('--use_CUDA', type=bool, default=use_CUDA)
     parser.add_argument('--batch_size', type=int, default=batch_size)
     parser.add_argument('--epochs', type=int, default=epochs)

@@ -25,15 +25,22 @@ from kobert import get_pytorch_kobert_model
 from kobert import get_tokenizer
 from gluonnlp.data import SentencepieceTokenizer
 from ETRI_Dataset import ETRI_Corpus_Dataset
+import re
 
-tokenizer = SentencepieceTokenizer(get_tokenizer())
-bert, vocab = get_pytorch_kobert_model()
-
-ETRI_Dataset = ETRI_Corpus_Dataset('/local_datasets', tokenizer, vocab)
-dataloader = DataLoader(ETRI_Dataset, batch_size=1, shuffle=True, num_workers=8)
-
-labels = [0,0,0,0]
-for i, batch in enumerate(dataloader):
-    for lbl in batch['label']:
-        labels[lbl] += 1
-print(labels)
+sentiment_dict = {}
+with open('data/subjclueslen1-HLTEMNLP05.tff', 'r', encoding='utf-8') as f:
+    # sentiment_dict = { re.split(" =\n", line) for line in f.readlines()}
+    for line in f.readlines():
+        line = re.split("=| |\n", line)
+        if line[11] == 'neutral':
+            sentiment_dict[line[5]] = 0
+        elif line[11] == 'positive':
+            if line[0] == 'strongsubj':
+                sentiment_dict[line[5]] = 2
+            else:
+                sentiment_dict[line[5]] = 1
+        elif line[11] == 'negative':
+            if line[0] == 'strongsubj':
+                sentiment_dict[line[5]] = -2
+            else:
+                sentiment_dict[line[5]] = -1

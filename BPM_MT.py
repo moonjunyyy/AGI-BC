@@ -61,7 +61,7 @@ class BPM_ST(nn.Module):
         return y
 
 class BPM_MT(nn.Module):
-    def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3):
+    def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3):
         super(BPM_MT, self).__init__()
 
         # get the bert model and tokenizer from arguments        
@@ -71,10 +71,11 @@ class BPM_MT(nn.Module):
         self.vocab = vocab
         self.tokenizer = tokenizer
 
-        self.sentiment_dict = json.load(open('data/SentiWord_info.json', encoding='utf-8-sig', mode='r'))
-
         # if bert and vocab are not provided, raise an error
         assert self.bert is not None and self.vocab is not None, "bert and vocab must be provided"
+
+        self.sentiment_dict = sentiment_dict
+        self.is_MT = self.sentiment_dict is not None       
         
         # define the MFCC extractor
         # self.mfcc_extractor = MFCC(sample_rate=sample_rate,n_mfcc=13)
@@ -90,9 +91,10 @@ class BPM_MT(nn.Module):
         self.classifier = nn.Linear(output_size, num_class)
 
         # FC layer that has 64 of nodes which fed the text feature
-        self.sentiment_fc_layer = nn.Linear(768, sentiment_output_size)
         # FC layer that has 5 of nodes which fed the sentiment feature
-        self.sentiment_classifier = nn.Linear(sentiment_output_size, 5)
+        if self.is_MT:
+            self.sentiment_fc_layer = nn.Linear(768, sentiment_output_size)
+            self.sentiment_classifier = nn.Linear(sentiment_output_size, 5)
 
     def forward(self, x):
         audio = x["audio"]
@@ -122,7 +124,8 @@ class BPM_MT(nn.Module):
         # pass the concatenated feature to classifier
         y["logit"] = self.classifier(self.dropout(x))
 
-        # pass the text feature to sentiment FC layer
-        y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_fc_layer(self.dropout(text))))
+        if self.is_MT:
+            # pass the text feature to sentiment FC layer
+            y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_fc_layer(self.dropout(text))))
         
         return y

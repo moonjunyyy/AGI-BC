@@ -11,10 +11,12 @@ import random
 import torch.backends.cudnn as cudnn
 import numpy as np
 from BPM_MT import BPM_MT, BPM_ST
-
+import json
 import torch
 import torch.nn.functional as F
 
+from transformers import BertModel
+from transformers import AutoTokenizer
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
 from torchaudio.transforms import MFCC
@@ -32,6 +34,7 @@ class Trainer:
         self.epochs = args.epochs
         self.world_size = args.world_size
         self.is_MT = args.is_MT
+        self.language = args.language
 
 
         self.seed = args.seed
@@ -75,9 +78,35 @@ class Trainer:
                 'You may see unexpected behavior when restarting '
                 'from checkpoints.')
                 
+        
         mfcc_extractor = MFCC(sample_rate=16000, n_mfcc=13)
-        tokenizer = SentencepieceTokenizer(get_tokenizer())
-        bert, vocab = get_pytorch_kobert_model()
+        if self.language == 'ko':
+            tokenizer = SentencepieceTokenizer(get_tokenizer())
+            bert, vocab = get_pytorch_kobert_model()
+            sentiment_dict = json.load(open('data/SentiWord_info.json', encoding='utf-8-sig', mode='r'))
+        elif self.language == 'en':
+            tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+            bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=True)
+            vocab = None
+            sentiment_dict = {}
+            with open('data/subjclueslen1-HLTEMNLP05.tff', 'r', encoding='utf-8') as f:
+                # sentiment_dict = { re.split(" =\n", line) for line in f.readlines()}
+                for line in f.readlines():
+                    line = re.split("=| |\n", line)
+                    if line[11] == 'neutral':
+                        sentiment_dict[line[5]] = 0
+                    elif line[11] == 'positive':
+                        if line[0] == 'strongsubj':
+                            sentiment_dict[line[5]] = 2
+                        else:
+                            sentiment_dict[line[5]] = 1
+                    elif line[11] == 'negative':
+                        if line[0] == 'strongsubj':
+                            sentiment_dict[line[5]] = -2
+                        else:
+                            sentiment_dict[line[5]] = -1
+        else:
+            raise NotImplementedError
 
         tf = transforms.ToTensor()
         dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, transform=tf, length=1.5)
@@ -91,7 +120,7 @@ class Trainer:
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
 
         if self.is_MT:
-            self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, mfcc_extractor=mfcc_extractor)
+            self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=sentiment_dict, mfcc_extractor=mfcc_extractor)
         else:
             self.model = BPM_ST(tokenizer=tokenizer, bert=bert, vocab=vocab, mfcc_extractor=mfcc_extractor)
         
