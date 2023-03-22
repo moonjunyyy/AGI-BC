@@ -25,22 +25,14 @@ from kobert import get_pytorch_kobert_model
 from kobert import get_tokenizer
 from gluonnlp.data import SentencepieceTokenizer
 from ETRI_Dataset import ETRI_Corpus_Dataset
+from SWBD_Dataset import SWBD_Dataset
 import re
 
-sentiment_dict = {}
-with open('data/subjclueslen1-HLTEMNLP05.tff', 'r', encoding='utf-8') as f:
-    # sentiment_dict = { re.split(" =\n", line) for line in f.readlines()}
-    for line in f.readlines():
-        line = re.split("=| |\n", line)
-        if line[11] == 'neutral':
-            sentiment_dict[line[5]] = 0
-        elif line[11] == 'positive':
-            if line[0] == 'strongsubj':
-                sentiment_dict[line[5]] = 2
-            else:
-                sentiment_dict[line[5]] = 1
-        elif line[11] == 'negative':
-            if line[0] == 'strongsubj':
-                sentiment_dict[line[5]] = -2
-            else:
-                sentiment_dict[line[5]] = -1
+from transformers import BertModel
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=True)
+
+SWBD_Dataset = SWBD_Dataset("/data/datasets", None, tokenizer)
+print(len(SWBD_Dataset))

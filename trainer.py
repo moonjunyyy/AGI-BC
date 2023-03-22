@@ -24,6 +24,7 @@ from kobert import get_pytorch_kobert_model
 from kobert import get_tokenizer
 from gluonnlp.data import SentencepieceTokenizer
 from ETRI_Dataset import ETRI_Corpus_Dataset
+from SWBD_Dataset import SWBD_Dataset
 
 class Trainer:
     def __init__(self, args) -> None:
@@ -35,7 +36,7 @@ class Trainer:
         self.world_size = args.world_size
         self.is_MT = args.is_MT
         self.language = args.language
-
+        self.num_class = args.num_class
 
         self.seed = args.seed
         self.distributed = False
@@ -89,27 +90,12 @@ class Trainer:
             bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=True)
             vocab = None
             sentiment_dict = {}
-            with open('data/subjclueslen1-HLTEMNLP05.tff', 'r', encoding='utf-8') as f:
-                # sentiment_dict = { re.split(" =\n", line) for line in f.readlines()}
-                for line in f.readlines():
-                    line = re.split("=| |\n", line)
-                    if line[11] == 'neutral':
-                        sentiment_dict[line[5]] = 0
-                    elif line[11] == 'positive':
-                        if line[0] == 'strongsubj':
-                            sentiment_dict[line[5]] = 2
-                        else:
-                            sentiment_dict[line[5]] = 1
-                    elif line[11] == 'negative':
-                        if line[0] == 'strongsubj':
-                            sentiment_dict[line[5]] = -2
-                        else:
-                            sentiment_dict[line[5]] = -1
         else:
             raise NotImplementedError
 
         tf = transforms.ToTensor()
-        dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, transform=tf, length=1.5)
+        # dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, transform=tf, length=1.5)
+        dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, length=1.5)
         self.train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
         self.val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
 
@@ -120,7 +106,7 @@ class Trainer:
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
 
         if self.is_MT:
-            self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=sentiment_dict, mfcc_extractor=mfcc_extractor)
+            self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=sentiment_dict, mfcc_extractor=mfcc_extractor, num_class=self.num_class)
         else:
             self.model = BPM_ST(tokenizer=tokenizer, bert=bert, vocab=vocab, mfcc_extractor=mfcc_extractor)
         
@@ -142,7 +128,7 @@ class Trainer:
 
         # Training loop
         for epoch in range(self.epochs):
-            for batch in self.train_dataloader:
+            for b, batch in enumerate(self.train_dataloader):
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
                     batch[key] = batch[key].cuda()
@@ -152,13 +138,21 @@ class Trainer:
                 logit     = y["logit"]
                 sentiment = y["sentiment"]
 
+
                 # Calculate the loss
-                loss_BC = F.cross_entropy(logit, batch["label"])
+                loss_BC = F.cross_entropy(logit, batch["label"], reduction='none')
+                
+                unq, cnt = batch["label"].unique(return_counts=True)
+                unq = torch.tensor([1/(cnt[l==unq]+1) if l in unq else 1 for l in batch["label"]], device=batch["label"].device)
+                loss_BC = (loss_BC * unq).mean()
+
                 if self.is_MT:
                     loss_SP = F.binary_cross_entropy(torch.sigmoid(sentiment), batch["sentiment"])
                     loss = 0.9 * loss_BC +  0.1 * loss_SP
                 else:
                     loss = loss_BC
+
+                accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
                 # Backpropagation
                 loss.backward()
@@ -171,38 +165,43 @@ class Trainer:
                 adam_optimizer.zero_grad()
                 sgd_optimizer.zero_grad()
 
-                print("Epoch : {}, Loss : {}".format(epoch, loss.item()))
+                print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
+                l, c = logit.argmax(dim=-1).unique(return_counts=True)
+                for i in range(len(l)):
+                    print(l[i].item(), ':', c[i].item(), end=' ')
+                print()
 
-            # Validation loop
-            accuracy = 0
-            loss     = 0
-            for batch in self.val_dataloader:
-                # Move the batch to GPU if CUDA is available
-                for key in batch:
-                    batch[key] = batch[key].cuda()
-                y = self.model(batch)
+            with torch.no_grad():
+                # Validation loop
+                accuracy = 0
+                loss     = 0
+                for batch in self.val_dataloader:
+                    # Move the batch to GPU if CUDA is available
+                    for key in batch:
+                        batch[key] = batch[key].cuda()
+                    y = self.model(batch)
 
-                # Get the logit from the model
-                logit     = y["logit"]
-                sentiment = y["sentiment"]
+                    # Get the logit from the model
+                    logit     = y["logit"]
+                    sentiment = y["sentiment"]
 
-                # Calculate the loss
-                loss_BC = F.cross_entropy(logit, batch["label"])
-                if self.is_MT:
-                    loss_SP = F.binary_cross_entropy(torch.sigmoid(sentiment), batch["sentiment"])
-                    loss = 0.9 * loss_BC +  0.1 * loss_SP
-                else:
-                    loss = loss_BC
+                    # Calculate the loss
+                    loss_BC = F.cross_entropy(logit, batch["label"])
+                    if self.is_MT:
+                        loss_SP = F.binary_cross_entropy(torch.sigmoid(sentiment), batch["sentiment"])
+                        loss = 0.9 * loss_BC +  0.1 * loss_SP
+                    else:
+                        loss = loss_BC
 
-                # Calculate the accuracy
-                accuracy += (torch.argmax(logit, dim=1) == batch["label"]).sum().item()
-                loss    += loss.item() * len(batch["label"])
-                if self.distributed:
-                    dist.all_reduce(accuracy, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(loss, op=dist.ReduceOp.SUM)
-            accuracy /= len(self.val_dataset)
-            loss     /= len(self.val_dataset)
-            print("Epoch : {}, Accuracy : {}, Loss : {}".format(epoch, accuracy, loss))
+                    # Calculate the accuracy
+                    accuracy += (torch.argmax(logit, dim=1) == batch["label"]).sum().item()
+                    loss    += loss.item() * len(batch["label"])
+                    if self.distributed:
+                        dist.all_reduce(accuracy, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+                accuracy /= len(self.val_dataset)
+                loss     /= len(self.val_dataset)
+                print("Epoch : {}, Accuracy : {}, Loss : {}".format(epoch, accuracy, loss))
         
 
     def init_distributed(self):

@@ -2,9 +2,8 @@
 
 #SBATCH -J BPM_MT
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-gpu=8
-#SBATCH --mem-per-gpu=16G
-#SBATCH --time=7-0
+#SBATCH --cpus-per-gpu=16
+#SBATCH --mem-per-gpu=32G
 #SBATCH -o %x_%j_%a.out
 #SBATCH -e %x_%j_%a.err
 
@@ -34,9 +33,10 @@ for i in seeds
 do
     python main.py \
     --seed ${seeds[$i]} \
-    --batch_size 64 \
-    --num_workers 8 \
+    --batch_size 480 \
+    --num_workers 16 \
     --epochs 60 \
+    --num_class 2 \
     --is_MT True \
     --lr 0.0005 \
     --dropout 0.3 \

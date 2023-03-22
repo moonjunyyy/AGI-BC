@@ -17,6 +17,7 @@ def main():
     parser.add_argument('--use_CUDA', type=bool, default=use_CUDA)
     parser.add_argument('--batch_size', type=int, default=batch_size)
     parser.add_argument('--epochs', type=int, default=epochs)
+    parser.add_argument('--num_class', type=int, default=4)
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
