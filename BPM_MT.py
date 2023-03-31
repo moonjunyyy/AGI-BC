@@ -72,7 +72,7 @@ class BPM_MT(nn.Module):
         self.tokenizer = tokenizer
 
         # if bert and vocab are not provided, raise an error
-        assert self.bert is not None and self.vocab is not None, "bert and vocab must be provided"
+        assert self.bert is not None, "bert and vocab must be provided"
 
         self.sentiment_dict = sentiment_dict
         self.is_MT = self.sentiment_dict is not None       
@@ -85,12 +85,12 @@ class BPM_MT(nn.Module):
         # define the LSTM layer, 4 of layers
         self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=6, batch_first=True, bidirectional=True)
 
-        self.accustic_fc_layer = nn.Linear(self.audio_feature_size * 2, int(output_size/2))
-        self.bert_fc_layer = nn.Linear(768, output_size-int(output_size/2))
+        # self.accustic_fc_layer = nn.Linear(self.audio_feature_size * 2, int(output_size/2))
+        # self.bert_fc_layer = nn.Linear(768, output_size-int(output_size/2))
         
         self.dropout = nn.Dropout(dropout)
         # FC layer that has 128 of nodes which fed concatenated feature of audio and text
-        # self.fc_layer = nn.Linear(768 + self.audio_feature_size * 2, output_size)
+        self.fc_layer = nn.Linear(768 + self.audio_feature_size * 2, output_size)
         self.classifier = nn.Linear(output_size, num_class)
 
         # FC layer that has 64 of nodes which fed the text feature
@@ -110,7 +110,9 @@ class BPM_MT(nn.Module):
         # text = self.vocab(text)
         # text = text.to(x["audio"].device)
         # extract the text feature from bert model
-        _, text = self.bert(text)
+        # print(text.shape)
+        text = self.bert(text).last_hidden_state
+        text = text[:, 0, :]
         y = {}
         
         # extract the MFCC feature from audio
@@ -121,13 +123,14 @@ class BPM_MT(nn.Module):
         audio, _ = self.LSTM(audio)
         audio = audio[-1]
 
-        audio = self.accustic_fc_layer(self.dropout(audio))
-        _text = self.bert_fc_layer(self.dropout(text))
+        # audio = self.accustic_fc_layer(self.dropout(audio))
+        # _text = self.bert_fc_layer(self.dropout(text))
         # concatenate the audio and text feature
-        x = torch.cat((audio, _text), dim=1)
+        x = torch.cat((audio, text), dim=1)
         # pass the concatenated feature to FC layer
         # x = self.fc_layer(self.dropout(x))
         # pass the concatenated feature to classifier
+        x = self.fc_layer(self.dropout(x))
         y["logit"] = self.classifier(self.dropout(x))
 
         if self.is_MT:

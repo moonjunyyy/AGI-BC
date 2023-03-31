@@ -22,13 +22,10 @@ class SWBD_Dataset(Dataset):
         self.vocab = vocab
         self.path = os.path.join(path, "swbd")
         if os.path.isdir(self.path) == False:
-            os.mkdir(self.path)
+            # os.makedirs(self.path, exist_ok=True)
             os.system(f"cp /data/datasets/swbd.tar {path}/")
-            os.system(f"cp /data/datasets/swbd.tar {path}/")
-            os.system(f"ll {path}")
             os.system(f"chmod 777 {path}/swbd.tar")
             os.system(f"tar -xvf {path}/swbd.tar -C {path}")
-            os.system(f"ls {self.path}")
             os.system(f"chmod -R 777  {self.path}/*")
             os.system(f"rm {path}/swbd.tar")
         self.length = length
@@ -97,25 +94,17 @@ class SWBD_Dataset(Dataset):
         if audio.size(1) != int(sr * 1.5):
             audio = F.pad(audio, (0, int(sr * 1.5) - audio.size(1)), "constant", 0)
 
-
         sentiment = torch.zeros(5)
         for word in trans.split(' '):
-            r_word, s_word = KnuSL.data_list(word)
-            if s_word != 'None':
-                sentiment[int(s_word)] += 1
+            if word in self.sentiment_dict:
+                sentiment[int(self.sentiment_dict[word])] += 1
             else:
                 sentiment[0] += 1
         sentiment = sentiment / sentiment.sum()
         
-        trans = self.vocab(self.tokenizer(trans))
-        trans = torch.tensor(trans + [4] * (64 - len(trans)))
+        # Tokenize with padding into 64
+        trans = self.tokenizer(trans, padding='max_length', max_length=64, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 
-        # print(torch.tensor(frames).shape)
-        # print(audio.shape)
-        # print(lable)
-        # print(trans.shape)
-        # print(sentiment)
-        # print("")
         ret['audio'] = audio
         ret['label'] = lable
         ret['text'] = trans

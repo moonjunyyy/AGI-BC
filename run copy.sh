@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=24G
-#SBATCH --time=7-0
+#SBATCH --time=4-0
 #SBATCH -o %x_%j_%a.out
 #SBATCH -e %x_%j_%a.err
 
@@ -28,4 +28,4 @@ conda activate BC
 conda --version
 python --version
 
-python ETRI_preprocess.py \
+python ETRI_preprocess.py

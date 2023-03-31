@@ -1,4 +1,5 @@
 import os
+import gc
 import time
 import torch
 import torch.nn as nn
@@ -15,8 +16,7 @@ import json
 import torch
 import torch.nn.functional as F
 
-from transformers import BertModel
-from transformers import AutoTokenizer
+from transformers import BertModel, AutoTokenizer
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
 from torchaudio.transforms import MFCC
@@ -36,7 +36,11 @@ class Trainer:
         self.world_size = args.world_size
         self.is_MT = args.is_MT
         self.language = args.language
-        self.num_class = args.num_class
+        if self.language == "ko":
+            self.num_class = 4
+            os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION']='python'
+        elif self.language == "en":
+            self.num_class = 2
 
         self.seed = args.seed
         self.distributed = False
@@ -45,7 +49,10 @@ class Trainer:
         self.world_size = args.world_size * self.ngpus_per_node
         self.distributed = self.world_size > 1
 
-        self.is_MT = args.is_MT
+        self.batch_size = int(self.batch_size / self.world_size)
+
+        # self.is_MT = False
+        print("is_MT: ", self.is_MT)
 
         if os.environ.get("MASTER_ADDR") is None:
             os.environ["MASTER_ADDR"] = "localhost"
@@ -82,20 +89,27 @@ class Trainer:
         
         mfcc_extractor = MFCC(sample_rate=16000, n_mfcc=13)
         if self.language == 'ko':
-            tokenizer = SentencepieceTokenizer(get_tokenizer())
-            bert, vocab = get_pytorch_kobert_model()
+            # tokenizer = SentencepieceTokenizer(get_tokenizer())
+            # bert, vocab = get_pytorch_kobert_model()
+            tokenizer = AutoTokenizer.from_pretrained('skt/kobert-base-v1')
+            bert = BertModel.from_pretrained("skt/kobert-base-v1", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
+            vocab = None
             sentiment_dict = json.load(open('data/SentiWord_info.json', encoding='utf-8-sig', mode='r'))
         elif self.language == 'en':
             tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-            bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=True)
+            bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
             vocab = None
             sentiment_dict = {}
         else:
             raise NotImplementedError
 
         tf = transforms.ToTensor()
-        # dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, transform=tf, length=1.5)
-        dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, length=1.5)
+
+        if self.language == 'ko':
+            dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, transform=tf, length=1.5)
+        else :
+            dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, length=1.5)
+            
         self.train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
         self.val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
 
@@ -108,7 +122,7 @@ class Trainer:
         if self.is_MT:
             self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=sentiment_dict, mfcc_extractor=mfcc_extractor, num_class=self.num_class)
         else:
-            self.model = BPM_ST(tokenizer=tokenizer, bert=bert, vocab=vocab, mfcc_extractor=mfcc_extractor)
+            self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=None, mfcc_extractor=mfcc_extractor, num_class=self.num_class)
         
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
@@ -123,8 +137,8 @@ class Trainer:
                 bert_params.append(param)
             else:
                 other_params.append(param)
-        adam_optimizer = torch.optim.Adam(bert_params, lr=0.0001)
-        sgd_optimizer = torch.optim.SGD(other_params, lr=0.0001)
+        adam_optimizer = torch.optim.Adam(bert_params, lr=0.0005, weight_decay=0.0001)
+        sgd_optimizer = torch.optim.SGD(other_params, lr=0.0005, weight_decay=0.0001)
 
         # Training loop
         for epoch in range(self.epochs):
@@ -136,7 +150,8 @@ class Trainer:
 
                 # Get the logit from the model
                 logit     = y["logit"]
-                sentiment = y["sentiment"]
+                if self.is_MT:
+                    sentiment = y["sentiment"]
 
 
                 # Calculate the loss
@@ -170,11 +185,18 @@ class Trainer:
                 for i in range(len(l)):
                     print(l[i].item(), ':', c[i].item(), end=' ')
                 print()
-
+                gc.collect()
+            
             with torch.no_grad():
                 # Validation loop
                 accuracy = 0
                 loss     = 0
+                
+                tp = torch.tensor([0 for _ in range(self.num_class)],device=self.local_rank)
+                fp = torch.tensor([0 for _ in range(self.num_class)],device=self.local_rank)
+                fn = torch.tensor([0 for _ in range(self.num_class)],device=self.local_rank)
+                tn = torch.tensor([0 for _ in range(self.num_class)],device=self.local_rank)
+
                 for batch in self.val_dataloader:
                     # Move the batch to GPU if CUDA is available
                     for key in batch:
@@ -183,7 +205,8 @@ class Trainer:
 
                     # Get the logit from the model
                     logit     = y["logit"]
-                    sentiment = y["sentiment"]
+                    if self.is_MT:
+                        sentiment = y["sentiment"]
 
                     # Calculate the loss
                     loss_BC = F.cross_entropy(logit, batch["label"])
@@ -196,12 +219,35 @@ class Trainer:
                     # Calculate the accuracy
                     accuracy += (torch.argmax(logit, dim=1) == batch["label"]).sum().item()
                     loss    += loss.item() * len(batch["label"])
+
+                    # Calculate the confusion matrix
+                    for i in range(len(batch["label"])):
+                        for l in range(self.num_class):
+                            if batch["label"][i] == l:
+                                if logit.argmax(dim=-1)[i] == l:
+                                    tp[l] += 1
+                                else:
+                                    fn[l] += 1
+                            else:
+                                if logit.argmax(dim=-1)[i] == l:
+                                    fp[l] += 1
+                                else:
+                                    tn[l] += 1
+
                     if self.distributed:
                         dist.all_reduce(accuracy, op=dist.ReduceOp.SUM)
                         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(tp, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(fp, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(fn, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(tn, op=dist.ReduceOp.SUM)
                 accuracy /= len(self.val_dataset)
                 loss     /= len(self.val_dataset)
-                print("Epoch : {}, Accuracy : {}, Loss : {}".format(epoch, accuracy, loss))
+                precision = tp / (tp + fp)
+                recall    = tp / (tp + fn)
+                f1_score  = 2 * precision * recall / (precision + recall)
+                print("Epoch : {}, Accuracy : {}, Loss : {}, F1 score : {}".format(epoch, accuracy, loss, f1_score.cpu().tolist()))
+            gc.collect()
         
 
     def init_distributed(self):

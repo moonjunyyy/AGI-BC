@@ -2,10 +2,11 @@
 
 #SBATCH -J BPM_MT
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-gpu=16
-#SBATCH --mem-per-gpu=32G
+#SBATCH --cpus-per-gpu=12
+#SBATCH --mem-per-gpu=36G
 #SBATCH -o %x_%j_%a.out
 #SBATCH -e %x_%j_%a.err
+#SBATCH --time=4-00:00:00
 
 date
 ulimit -n 65536
@@ -34,11 +35,11 @@ do
     python main.py \
     --seed ${seeds[$i]} \
     --batch_size 480 \
-    --num_workers 16 \
-    --epochs 60 \
-    --num_class 2 \
-    --is_MT True \
-    --lr 0.0005 \
+    --num_workers 8 \
+    --epochs 150 \
+    --is_MT False \
+    --language en \
+    --lr 0.01 \
     --dropout 0.3 \
     --world_size $WORLD_SIZE \
     --rank $SLURM_PROCID
