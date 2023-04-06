@@ -34,11 +34,11 @@ for i in seeds
 do
     python main.py \
     --seed ${seeds[$i]} \
-    --batch_size 480 \
+    --batch_size 320 \
     --num_workers 8 \
     --epochs 150 \
-    --is_MT False \
-    --language en \
+    --is_MT True \
+    --language ko \
     --lr 0.01 \
     --dropout 0.3 \
     --world_size $WORLD_SIZE \

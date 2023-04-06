@@ -60,6 +60,8 @@ class ETRI_Corpus_Dataset(Dataset):
             del(frames)
             gc.collect()
         print(f"Bad file: {bad_idx}")
+        #print number of the labels
+        print(self.dataframe['BC'].value_counts())
 
         self.dataframe = self.dataframe[~self.dataframe['filename'].isin(bad_idx)]
         # print(self.dataframe)

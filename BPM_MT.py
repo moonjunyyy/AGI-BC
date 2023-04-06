@@ -83,7 +83,7 @@ class BPM_MT(nn.Module):
         self.audio_feature_size = mfcc_extractor.n_mfcc
 
         # define the LSTM layer, 4 of layers
-        self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=6, batch_first=True, bidirectional=True)
+        self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=12, batch_first=True, bidirectional=True)
 
         # self.accustic_fc_layer = nn.Linear(self.audio_feature_size * 2, int(output_size/2))
         # self.bert_fc_layer = nn.Linear(768, output_size-int(output_size/2))
@@ -91,12 +91,14 @@ class BPM_MT(nn.Module):
         self.dropout = nn.Dropout(dropout)
         # FC layer that has 128 of nodes which fed concatenated feature of audio and text
         self.fc_layer = nn.Linear(768 + self.audio_feature_size * 2, output_size)
+        self.relu = nn.ReLU()
         self.classifier = nn.Linear(output_size, num_class)
 
         # FC layer that has 64 of nodes which fed the text feature
         # FC layer that has 5 of nodes which fed the sentiment feature
         if self.is_MT:
             self.sentiment_fc_layer = nn.Linear(768, sentiment_output_size)
+            self.sentiment_relu = nn.ReLU()
             self.sentiment_classifier = nn.Linear(sentiment_output_size, 5)
 
     def forward(self, x):
@@ -131,10 +133,11 @@ class BPM_MT(nn.Module):
         # x = self.fc_layer(self.dropout(x))
         # pass the concatenated feature to classifier
         x = self.fc_layer(self.dropout(x))
+        x = self.relu(x)
         y["logit"] = self.classifier(self.dropout(x))
 
         if self.is_MT:
             # pass the text feature to sentiment FC layer
-            y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_fc_layer(self.dropout(text))))
+            y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_relu(self.sentiment_fc_layer(self.dropout(text)))))
         
         return y

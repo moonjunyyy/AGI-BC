@@ -51,7 +51,7 @@ class Trainer:
 
         self.batch_size = int(self.batch_size / self.world_size)
 
-        # self.is_MT = False
+        self.is_MT = True
         print("is_MT: ", self.is_MT)
 
         if os.environ.get("MASTER_ADDR") is None:

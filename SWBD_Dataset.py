@@ -50,6 +50,7 @@ class SWBD_Dataset(Dataset):
             except:
                 bad_idx.append(idx)
         print(f"Bad file: {bad_idx}")
+        print(self.dataframe['BC'].value_counts())
 
         self.sentiment_dict = {}
         with open('data/subjclueslen1-HLTEMNLP05.tff', 'r', encoding='utf-8') as f:
