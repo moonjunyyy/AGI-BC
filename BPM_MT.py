@@ -68,11 +68,6 @@ class BPM_ST(nn.Module):
         x = self.fc_layer(self.dropout(x))
         y["logit"] = self.classifier(self.dropout(x))
 
-        if self.is_MT:
-            # pass the text feature to sentiment FC layer
-            sentiment = self.sentiment_fc_layer(self.dropout(text))
-            sentiment = self.sentiment_relu(sentiment)
-            y["sentiment"] = self.sentiment_classifier(sentiment)
 
 class BPM_MT(nn.Module):
     def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None, sentiment_dict = None, trans = None, hubert = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3):
