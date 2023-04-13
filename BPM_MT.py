@@ -68,6 +68,10 @@ class BPM_ST(nn.Module):
         x = self.fc_layer(self.dropout(x))
         y["logit"] = self.classifier(self.dropout(x))
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> c0e638ab7f38b1b4c23ac857909d9270dca41344
 class BPM_MT(nn.Module):
     def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None, sentiment_dict = None, trans = None, hubert = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3):
         super(BPM_MT, self).__init__()
