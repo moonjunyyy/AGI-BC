@@ -18,7 +18,7 @@ class BPM_ST(nn.Module):
         self.hubert = None # hubert
         
         # if bert and vocab are not provided, raise an error
-        assert self.bert is not None and self.vocab is not None, "bert and vocab must be provided"
+        assert self.bert is not None, "bert and vocab must be provided"
         
         # define the MFCC extractor
         # self.mfcc_extractor = MFCC(sample_rate=sample_rate,n_mfcc=13)
@@ -31,7 +31,7 @@ class BPM_ST(nn.Module):
         self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=4, batch_first=True, bidirectional=True)
 
         # FC layer that has 128 of nodes which fed concatenated feature of audio and text
-        self.fc_layer = nn.Linear(768 + self.audio_feature_size, output_size)
+        self.fc_layer = nn.Linear(768 + 2*self.audio_feature_size, output_size)
         # FC layer that has 4 of nodes which fed the text feature
         self.classifier = nn.Linear(output_size, num_class)
         
@@ -67,11 +67,9 @@ class BPM_ST(nn.Module):
         x = torch.cat((audio, text), dim=1)
         x = self.fc_layer(self.dropout(x))
         y["logit"] = self.classifier(self.dropout(x))
+        
+        return y
 
-<<<<<<< HEAD
-=======
-
->>>>>>> c0e638ab7f38b1b4c23ac857909d9270dca41344
 class BPM_MT(nn.Module):
     def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None, sentiment_dict = None, trans = None, hubert = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3):
         super(BPM_MT, self).__init__()
