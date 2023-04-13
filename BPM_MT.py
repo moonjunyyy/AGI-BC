@@ -2,6 +2,7 @@ import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from selfattention import SelfAttention
 
 class BPM_ST(nn.Module):
     def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None ,trans = None, hubert = None ,output_size=128, num_class=4, dropout=0.3):
@@ -13,8 +14,8 @@ class BPM_ST(nn.Module):
         self.bert = bert
         self.vocab = vocab
         self.tokenizer = tokenizer
-        self.trans = None #trans
-        self.hubert = None #hubert
+        self.trans = None # trans
+        self.hubert = None # hubert
         
         # if bert and vocab are not provided, raise an error
         assert self.bert is not None and self.vocab is not None, "bert and vocab must be provided"
@@ -48,12 +49,13 @@ class BPM_ST(nn.Module):
         else:
             text = text[:, :, :]
             
-        #if self.hubert is not None:
-            
+        if self.hubert is not None:
+            haudio = self.Hubert(audio).last_hidden_state
         
-        
+
         y = {}
         
+        # base code
         # extract the MFCC feature from audio
         audio = self.mfcc_extractor(audio) # 64,13,61
         # reshape the MFCC feature to (batch_size, length, 13)
@@ -61,18 +63,10 @@ class BPM_ST(nn.Module):
         # pass the MFCC feature to LSTM layer
         audio, _ = self.LSTM(audio) # 64,61,26
         audio = audio[:,-1,:].squeeze(1)
-
-        
         
         x = torch.cat((audio, text), dim=1)
         x = self.fc_layer(self.dropout(x))
         y["logit"] = self.classifier(self.dropout(x))
-
-        if self.is_MT:
-            # pass the text feature to sentiment FC layer
-            sentiment = self.sentiment_fc_layer(self.dropout(text))
-            sentiment = self.sentiment_relu(sentiment)
-            y["sentiment"] = self.sentiment_classifier(sentiment)
 
 class BPM_MT(nn.Module):
     def __init__(self, tokenizer=None, bert=None, vocab=None, mfcc_extractor=None, sentiment_dict = None, trans = None, hubert = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3):

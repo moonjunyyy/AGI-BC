@@ -121,12 +121,14 @@ class Trainer:
         self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
 
+        self.is_MT = False
+        
         if self.is_MT:
             print("MT is running")
             self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=sentiment_dict, mfcc_extractor=mfcc_extractor,trans = self.trans, hubert = self.hubert, num_class=self.num_class)
         else:
             print("ST is running")
-            self.model = BPM_ST(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=None, mfcc_extractor=mfcc_extractor, trans = self.trans, hubert = self.hubert, num_class=self.num_class)
+            self.model = BPM_ST(tokenizer=tokenizer, bert=bert, vocab=vocab, mfcc_extractor=mfcc_extractor, trans = self.trans, hubert = self.hubert, num_class=self.num_class)
         
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
@@ -270,7 +272,6 @@ class Trainer:
                 sec = time() -start
                 times = str(datetime.timedelta(seconds=sec))
                 short = times.split(".")[0]
-                
                 
                 print("Epoch : {}, Accuracy : {}, Loss : {}".format(epoch, accuracy, loss))
                 print("F1 score : {},  All : {}, Time taken : {} ".format(score, (score[0]+score[1])/2 , short))
