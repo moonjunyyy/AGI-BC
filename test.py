@@ -31,8 +31,17 @@ import re
 from transformers import BertModel
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=True)
+input_size = 13
+hidden_size = 13
+num_layers = 4
+batch_first = True
+bidirectional = True
+dropout = 0.3
+num_class = 4
+output_size = 128
+audio_feature_size = 13
 
-SWBD_Dataset = SWBD_Dataset("/data/datasets", None, tokenizer)
-print(len(SWBD_Dataset))
+lstm = torch.nn.LSTM(input_size=audio_feature_size, hidden_size=audio_feature_size, num_layers=6, batch_first=True, bidirectional=True)
+x = torch.randn(1, 100, 13)
+x, _ = lstm(x)
+print(x.shape)

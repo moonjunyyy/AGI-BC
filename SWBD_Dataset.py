@@ -85,7 +85,7 @@ class SWBD_Dataset(Dataset):
         start = item['start']
         end   = item['end']
         role  = item['role']
-        role  = role == 1
+        role  = role == 'B'
 
         path = os.path.join(self.path, f"{str(idx)}.wav")
         
@@ -102,7 +102,8 @@ class SWBD_Dataset(Dataset):
             else:
                 sentiment[0] += 1
         sentiment = sentiment / sentiment.sum()
-        
+        # print(sentiment)
+
         # Tokenize with padding into 64
         trans = self.tokenizer(trans, padding='max_length', max_length=64, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 

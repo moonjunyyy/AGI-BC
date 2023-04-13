@@ -51,7 +51,7 @@ class Trainer:
 
         self.batch_size = int(self.batch_size / self.world_size)
 
-        self.is_MT = True
+        self.is_MT = False
         print("is_MT: ", self.is_MT)
 
         if os.environ.get("MASTER_ADDR") is None:
@@ -146,27 +146,42 @@ class Trainer:
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
                     batch[key] = batch[key].cuda()
-                y = self.model(batch)
 
+                y = self.model(batch)
                 # Get the logit from the model
                 logit     = y["logit"]
                 if self.is_MT:
                     sentiment = y["sentiment"]
-
-
                 # Calculate the loss
                 loss_BC = F.cross_entropy(logit, batch["label"], reduction='none')
-                
-                unq, cnt = batch["label"].unique(return_counts=True)
-                unq = torch.tensor([1/(cnt[l==unq]+1) if l in unq else 1 for l in batch["label"]], device=batch["label"].device)
-                loss_BC = (loss_BC * unq).mean()
-
                 if self.is_MT:
                     loss_SP = F.binary_cross_entropy(torch.sigmoid(sentiment), batch["sentiment"])
-                    loss = 0.9 * loss_BC +  0.1 * loss_SP
+                    loss = 0.9 * loss_BC + 0.1 * loss_SP
                 else:
                     loss = loss_BC
 
+                # batch_similarity = torch.zeros(batch["audio"].shape[0]).cuda()
+                # for i, l in enumerate(loss):
+                #     l.backward(retain_graph=True)
+                #     count = 0
+                #     similarity = 0
+                #     W_g = self.model_without_ddp.classifier.weight.grad
+                #     B_g = self.model_without_ddp.classifier.bias.grad
+                #     similarity += F.cosine_similarity(W_g, self.model_without_ddp.classifier.weight, dim=1).sum()
+                #     similarity += F.cosine_similarity(B_g, self.model_without_ddp.classifier.bias, dim=0).sum()
+                #     similarity = similarity / 2
+                #     batch_similarity[i] = similarity.item()
+
+                #     adam_optimizer.zero_grad()
+                #     sgd_optimizer.zero_grad()
+
+                # batch_distance = 1 - batch_similarity
+                # batch_distance = 2 ** (batch_distance)
+
+                unq, cnt = batch["label"].unique(return_counts=True)
+                unq = torch.tensor([1/(cnt[l==unq]+1) if l in unq else 1 for l in batch["label"]], device=batch["label"].device)
+                loss = (loss * unq).mean()
+                # loss = (loss * batch_distance).mean()
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
                 # Backpropagation

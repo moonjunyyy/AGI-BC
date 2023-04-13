@@ -83,7 +83,7 @@ class BPM_MT(nn.Module):
         self.audio_feature_size = mfcc_extractor.n_mfcc
 
         # define the LSTM layer, 4 of layers
-        self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=12, batch_first=True, bidirectional=True)
+        self.LSTM = nn.LSTM(input_size=self.audio_feature_size, hidden_size=self.audio_feature_size, num_layers=6, batch_first=True, bidirectional=True)
 
         # self.accustic_fc_layer = nn.Linear(self.audio_feature_size * 2, int(output_size/2))
         # self.bert_fc_layer = nn.Linear(768, output_size-int(output_size/2))
@@ -118,26 +118,24 @@ class BPM_MT(nn.Module):
         y = {}
         
         # extract the MFCC feature from audio
-        audio = self.mfcc_extractor(audio).squeeze()
+        audio = self.mfcc_extractor(audio).squeeze(1)
         # reshape the MFCC feature to (batch_size, length, 13)
-        audio = audio.permute(2, 0, 1)
+        # print(audio.shape)
+        audio = audio.permute(0, 2, 1)
+        # print(audio.shape)
         # pass the MFCC feature to LSTM layer
         audio, _ = self.LSTM(audio)
-        audio = audio[-1]
+        audio = audio[:, -1, :]
 
-        # audio = self.accustic_fc_layer(self.dropout(audio))
-        # _text = self.bert_fc_layer(self.dropout(text))
-        # concatenate the audio and text feature
         x = torch.cat((audio, text), dim=1)
-        # pass the concatenated feature to FC layer
-        # x = self.fc_layer(self.dropout(x))
-        # pass the concatenated feature to classifier
         x = self.fc_layer(self.dropout(x))
         x = self.relu(x)
         y["logit"] = self.classifier(self.dropout(x))
 
         if self.is_MT:
             # pass the text feature to sentiment FC layer
-            y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_relu(self.sentiment_fc_layer(self.dropout(text)))))
+            sentiment = self.sentiment_fc_layer(self.dropout(text))
+            sentiment = self.sentiment_relu(sentiment)
+            y["sentiment"] = self.sentiment_classifier(sentiment)
         
         return y
