@@ -15,8 +15,9 @@ from BPM_MT import BPM_MT, BPM_ST
 import json
 import torch
 import torch.nn.functional as F
-
-from transformers import BertModel, AutoTokenizer
+import matplotlib.pyplot as plt
+from time import time
+from transformers import BertModel, AutoTokenizer,HubertModel,WavLMModel
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
 from torchaudio.transforms import MFCC
@@ -25,6 +26,9 @@ from kobert import get_tokenizer
 from gluonnlp.data import SentencepieceTokenizer
 from ETRI_Dataset import ETRI_Corpus_Dataset
 from SWBD_Dataset import SWBD_Dataset
+from torchaudio.transforms import MelSpectrogram
+from tqdm import tqdm
+import datetime
 
 class Trainer:
     def __init__(self, args) -> None:
@@ -48,11 +52,10 @@ class Trainer:
         self.ngpus_per_node = torch.cuda.device_count()
         self.world_size = args.world_size * self.ngpus_per_node
         self.distributed = self.world_size > 1
-
         self.batch_size = int(self.batch_size / self.world_size)
-
-        self.is_MT = False
-        print("is_MT: ", self.is_MT)
+        
+        self.trans =  nn.Transformer(d_model=768, nhead=12, num_encoder_layers=3, num_decoder_layers=3, dim_feedforward=2048, dropout=0.3, batch_first=True)
+        self.hubert = HubertModel.from_pretrained("facebook/hubert-base-ls960")
 
         if os.environ.get("MASTER_ADDR") is None:
             os.environ["MASTER_ADDR"] = "localhost"
@@ -89,8 +92,6 @@ class Trainer:
         
         mfcc_extractor = MFCC(sample_rate=16000, n_mfcc=13)
         if self.language == 'ko':
-            # tokenizer = SentencepieceTokenizer(get_tokenizer())
-            # bert, vocab = get_pytorch_kobert_model()
             tokenizer = AutoTokenizer.from_pretrained('skt/kobert-base-v1')
             bert = BertModel.from_pretrained("skt/kobert-base-v1", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
             vocab = None
@@ -106,7 +107,8 @@ class Trainer:
         tf = transforms.ToTensor()
 
         if self.language == 'ko':
-            dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, transform=tf, length=1.5)
+            dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, length=1.5)
+            #dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, transform=tf, length=1.5)
         else :
             dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, length=1.5)
             
@@ -120,9 +122,11 @@ class Trainer:
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
 
         if self.is_MT:
-            self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=sentiment_dict, mfcc_extractor=mfcc_extractor, num_class=self.num_class)
+            print("MT is running")
+            self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=sentiment_dict, mfcc_extractor=mfcc_extractor,trans = self.trans, hubert = self.hubert, num_class=self.num_class)
         else:
-            self.model = BPM_MT(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=None, mfcc_extractor=mfcc_extractor, num_class=self.num_class)
+            print("ST is running")
+            self.model = BPM_ST(tokenizer=tokenizer, bert=bert, vocab=vocab, sentiment_dict=None, mfcc_extractor=mfcc_extractor, trans = self.trans, hubert = self.hubert, num_class=self.num_class)
         
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
@@ -141,7 +145,8 @@ class Trainer:
         sgd_optimizer = torch.optim.SGD(other_params, lr=0.0005, weight_decay=0.0001)
 
         # Training loop
-        for epoch in range(self.epochs):
+        for epoch in tqdm(range(self.epochs)):
+            start=time()
             for b, batch in enumerate(self.train_dataloader):
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
@@ -181,7 +186,7 @@ class Trainer:
                 unq, cnt = batch["label"].unique(return_counts=True)
                 unq = torch.tensor([1/(cnt[l==unq]+1) if l in unq else 1 for l in batch["label"]], device=batch["label"].device)
                 loss = (loss * unq).mean()
-                # loss = (loss * batch_distance).mean()
+                
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
                 # Backpropagation
@@ -195,11 +200,8 @@ class Trainer:
                 adam_optimizer.zero_grad()
                 sgd_optimizer.zero_grad()
 
-                print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
-                l, c = logit.argmax(dim=-1).unique(return_counts=True)
-                for i in range(len(l)):
-                    print(l[i].item(), ':', c[i].item(), end=' ')
-                print()
+                #print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
+                #print()
                 gc.collect()
             
             with torch.no_grad():
@@ -256,12 +258,22 @@ class Trainer:
                         dist.all_reduce(fp, op=dist.ReduceOp.SUM)
                         dist.all_reduce(fn, op=dist.ReduceOp.SUM)
                         dist.all_reduce(tn, op=dist.ReduceOp.SUM)
+                        
                 accuracy /= len(self.val_dataset)
                 loss     /= len(self.val_dataset)
                 precision = tp / (tp + fp)
                 recall    = tp / (tp + fn)
                 f1_score  = 2 * precision * recall / (precision + recall)
-                print("Epoch : {}, Accuracy : {}, Loss : {}, F1 score : {}".format(epoch, accuracy, loss, f1_score.cpu().tolist()))
+                score = f1_score.cpu().tolist()
+                
+                # Time check
+                sec = time() -start
+                times = str(datetime.timedelta(seconds=sec))
+                short = times.split(".")[0]
+                
+                
+                print("Epoch : {}, Accuracy : {}, Loss : {}".format(epoch, accuracy, loss))
+                print("F1 score : {},  All : {}, Time taken : {} ".format(score, (score[0]+score[1])/2 , short))
             gc.collect()
         
 

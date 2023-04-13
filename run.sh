@@ -1,12 +1,15 @@
 #!/bin/bash
 
-#SBATCH -J BPM_MT
+#SBATCH -J Pure_ST_1
+#SBATCH --nodelist=augi1
+#SBATCH --partition batch
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-gpu=12
-#SBATCH --mem-per-gpu=36G
-#SBATCH -o %x_%j_%a.out
-#SBATCH -e %x_%j_%a.err
-#SBATCH --time=4-00:00:00
+#SBATCH --cpus-per-gpu=8
+#SBATCH --mem-per-gpu=20G
+#SBATCH --partition batch
+#SBATCH -o slurm/logs/%A-%x.out
+#SBATCH -e slurm/logs/%A-%x.err
+#SBATCH --time=4-0
 
 date
 ulimit -n 65536
@@ -21,12 +24,6 @@ echo "NODELIST="${SLURM_NODELIST}
 master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=$master_addr
 echo "MASTER_ADDR="$MASTER_ADDR
-
-source /data/moonjunyyy/init.sh
-conda activate BC
-
-conda --version
-python --version
 
 seeds=(1 21 42 3473 10741 32450 93462 85015 64648 71950 87557 99668 55552 4811 10741)
 
