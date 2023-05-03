@@ -2,26 +2,32 @@ import os
 import gc
 import time
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import random
 import torch.backends.cudnn as cudnn
 import numpy as np
-from BPM_MT import BPM_MT
+from BPM_MT import BPM_MT, BPM_ST
 import json
 import torch
 import torch.nn.functional as F
 
 from transformers import BertModel, AutoTokenizer
 import torchvision.transforms as transforms
-from torch.utils.data import Subset
+from torch.utils.data import DataLoader, Subset
+from torchaudio.transforms import MFCC
+from kobert import get_pytorch_kobert_model
+from kobert import get_tokenizer
+from gluonnlp.data import SentencepieceTokenizer
 from ETRI_Dataset import ETRI_Corpus_Dataset
 from SWBD_Dataset import SWBD_Dataset
-from HuBert import HuBert
-from Audio_LSTM import Audio_LSTM
 
 from transformers import AutoTokenizer, AutoModelForPreTraining
+from transformers import AutoProcessor, AutoModel
 
 class Trainer:
     def __init__(self, args) -> None:
@@ -33,7 +39,12 @@ class Trainer:
         self.world_size = args.world_size
         self.is_MT = args.is_MT
         self.language = args.language
-        self.audio = args.audio
+
+        if self.language == "ko":
+            self.num_class = 4
+            os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION']='python'
+        elif self.language == "en":
+            self.num_class = 2
 
         self.seed = args.seed
         self.distributed = False
@@ -79,35 +90,19 @@ class Trainer:
                 'from checkpoints.')
                 
         
-        if self.language == 'koBert':
-            tokenizer = AutoTokenizer.from_pretrained('skt/kobert-base-v1')
-            bert = BertModel.from_pretrained("skt/kobert-base-v1", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
-            sentiment_dict = json.load(open('data/SentiWord_info.json', encoding='utf-8-sig', mode='r'))
-            self.num_class = 4
-        elif self.language == 'Bert':
-            tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-            bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
-            sentiment_dict = {}
-            self.num_class = 2
-        elif self.language == 'ELECTRA':
-            tokenizer = AutoTokenizer.from_pretrained("google/electra-base-discriminator")
-            bert = AutoModelForPreTraining.from_pretrained("google/electra-base-discriminator")
-            sentiment_dict = {}
-            self.num_class = 2
-        else:
-            raise NotImplementedError
+        mfcc_extractor = MFCC(sample_rate=16000, n_mfcc=13)
         
-        if self.audio == 'LSTM':
-            audio_model = Audio_LSTM()
-        elif self.audio == 'HuBert':
-            audio_model = HuBert()
+        hubert_processor = AutoProcessor.from_pretrained("facebook/hubert-base-ls960")
+        hubert_model = AutoModel.from_pretrained("facebook/hubert-base-ls960")
+        electra_tokenizer = AutoTokenizer.from_pretrained("google/electra-base-discriminator")
+        electra_model = AutoModelForPreTraining.from_pretrained("google/electra-base-discriminator")
 
         tf = transforms.ToTensor()
 
-        if self.language == 'koBert':
-            dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, transform=tf, length=1.5)
+        if self.language == 'ko':
+            dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, transform=tf, length=1.5)
         else :
-            dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, length=1.5)
+            dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, vocab=vocab, length=1.5)
             
         self.train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
         self.val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
@@ -119,9 +114,9 @@ class Trainer:
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
 
         if self.is_MT:
-            self.model = BPM_MT(language_model=bert, audio_model=audio_model, sentiment_dict=sentiment_dict, num_class=self.num_class)
+            self.model = BPM_MT(language_model=bert, sentiment_dict=sentiment_dict, mfcc_extractor=mfcc_extractor, num_class=self.num_class)
         else:
-            self.model = BPM_MT(language_model=bert, audio_model=audio_model, sentiment_dict=None, num_class=self.num_class)
+            self.model = BPM_MT(language_model=bert, sentiment_dict=None, mfcc_extractor=mfcc_extractor, num_class=self.num_class)
         
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
@@ -132,7 +127,7 @@ class Trainer:
         bert_params = []
         other_params = []
         for name, param in self.model.named_parameters():
-            if 'language_model' in name:
+            if 'bert' in name:
                 bert_params.append(param)
             else:
                 other_params.append(param)
@@ -159,29 +154,11 @@ class Trainer:
                 else:
                     loss = loss_BC
 
-                # batch_similarity = torch.zeros(batch["audio"].shape[0]).cuda()
-                # for i, l in enumerate(loss):
-                #     l.backward(retain_graph=True)
-                #     count = 0
-                #     similarity = 0
-                #     W_g = self.model_without_ddp.classifier.weight.grad
-                #     B_g = self.model_without_ddp.classifier.bias.grad
-                #     similarity += F.cosine_similarity(W_g, self.model_without_ddp.classifier.weight, dim=1).sum()
-                #     similarity += F.cosine_similarity(B_g, self.model_without_ddp.classifier.bias, dim=0).sum()
-                #     similarity = similarity / 2
-                #     batch_similarity[i] = similarity.item()
-
-                #     adam_optimizer.zero_grad()
-                #     sgd_optimizer.zero_grad()
-
-                # batch_distance = 1 - batch_similarity
-                # batch_distance = 2 ** (batch_distance)
-
-                # unq, cnt = batch["label"].unique(return_counts=True)
-                # unq = torch.tensor([1/(cnt[l==unq]+1) if l in unq else 1 for l in batch["label"]], device=batch["label"].device)
-                # loss = (loss * unq).mean()
+                unq, cnt = batch["label"].unique(return_counts=True)
+                unq = torch.tensor([1/(cnt[l==unq]+1) if l in unq else 1 for l in batch["label"]], device=batch["label"].device)
+                loss = (loss * unq).mean()
                 # loss = (loss * batch_distance).mean()
-                loss = loss.mean()
+                # loss = loss.mean()
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
                 # Backpropagation
@@ -195,10 +172,10 @@ class Trainer:
                 adam_optimizer.zero_grad()
                 sgd_optimizer.zero_grad()
 
-                # print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
+                print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
                 l, c = logit.argmax(dim=-1).unique(return_counts=True)
-                # for i in range(len(l)):
-                #     print(l[i].item(), ':', c[i].item(), end=' ')
+                for i in range(len(l)):
+                    print(l[i].item(), ':', c[i].item(), end=' ')
                 print()
                 gc.collect()
             

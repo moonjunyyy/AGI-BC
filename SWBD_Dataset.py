@@ -14,13 +14,13 @@ import numpy as np
 import re
 
 class SWBD_Dataset(Dataset):
-    def __init__(self, path, tokenizer, vocab, length :float = 1.5) -> None:
+    def __init__(self, path, tokenizer, length :float = 1.5) -> None:
         super().__init__()
         # self.path = os.path.join(path, "ETRI_Backchannel_Corpus_2022")
         print("Load SWBD_Dataset...")
         self.tokenizer = tokenizer
-        self.vocab = vocab
         self.path = os.path.join(path, "swbd")
+        shutil.rmtree(self.path, ignore_errors=True)
         if os.path.isdir(self.path) == False:
             # os.makedirs(self.path, exist_ok=True)
             os.system(f"cp /data/datasets/swbd.tar {path}/")
@@ -36,7 +36,7 @@ class SWBD_Dataset(Dataset):
         # print(self.dataframe)
         # self.dataframe = self.dataframe[(self.dataframe['end']-self.dataframe['start'])>(self.length)]
         # self.dataframe = self.dataframe[~self.dataframe['folder'].isin([2,12,31])]
-
+        print(self.dataframe)
         bad_idx = []
         for idx, row in self.dataframe.iterrows():
             if idx in bad_idx:
@@ -50,7 +50,6 @@ class SWBD_Dataset(Dataset):
             except:
                 bad_idx.append(idx)
         print(f"Bad file: {bad_idx}")
-        print(self.dataframe['BC'].value_counts())
 
         self.sentiment_dict = {}
         with open('data/subjclueslen1-HLTEMNLP05.tff', 'r', encoding='utf-8') as f:
@@ -70,6 +69,13 @@ class SWBD_Dataset(Dataset):
                     else:
                         self.sentiment_dict[line[5]] = -1
         self.dataframe = self.dataframe[~self.dataframe['filename'].isin(bad_idx)]
+
+        df0 = self.dataframe[self.dataframe['BC'] == 0]
+        df1 = self.dataframe[self.dataframe['BC'] == 1]
+
+        self.dataframe = pd.concat([df0.sample(n=len(df1), random_state=42), df1], ignore_index=True)
+        self.dataframe = self.dataframe.sample(frac=1, random_state=42)
+        print(self.dataframe['BC'].value_counts())
 
     def __len__(self):
         return len(self.dataframe)

@@ -30,6 +30,9 @@ python --version
 
 seeds=(1 21 42 3473 10741 32450 93462 85015 64648 71950 87557 99668 55552 4811 10741)
 
+export JAVA_HOME=dirname $(readlink -f $(which java))
+export PATH=$PATH:$JAVA_HOME
+
 for i in seeds
 do
     python main.py \
@@ -37,9 +40,9 @@ do
     --batch_size 240 \
     --num_workers 8 \
     --epochs 60 \
-    --is_MT False \
-    --language en \
-    --lr 0.01 \
+    --language Bert \
+    --audio LSTM \
+    --lr 0.0005 \
     --dropout 0.3 \
     --world_size $WORLD_SIZE \
     --rank $SLURM_PROCID

@@ -12,14 +12,14 @@ from knusl import KnuSL
 import math
 from decord import VideoReader, cpu
 import numpy as np
+from konlpy.tag import Okt
 
 class ETRI_Corpus_Dataset(Dataset):
-    def __init__(self, path, tokenizer, vocab, transform : Callable=None, length :float = 1.5) -> None:
+    def __init__(self, path, tokenizer, transform : Callable=None, length :float = 1.5) -> None:
         super().__init__()
         # self.path = os.path.join(path, "ETRI_Backchannel_Corpus_2022")
         print("Load ETRI_Corpus_Dataset...")
         self.tokenizer = tokenizer
-        self.vocab = vocab
         self.path = os.path.join(path, "ETRI_Corpus_Clip")
         # os.system(f"rm -r {self.path}/")
         if os.path.isdir(self.path) == False:
@@ -70,6 +70,8 @@ class ETRI_Corpus_Dataset(Dataset):
         return len(self.dataframe)
     
     def __getitem__(self, index):
+        
+        self.okt = Okt()
         ret = {}
 
         item = self.dataframe.iloc[index]
@@ -93,7 +95,7 @@ class ETRI_Corpus_Dataset(Dataset):
 
 
         sentiment = torch.zeros(5)
-        for word in trans.split(' '):
+        for word in self.okt.morphs(trans):
             r_word, s_word = KnuSL.data_list(word)
             if s_word != 'None':
                 sentiment[int(s_word)] += 1
@@ -125,11 +127,7 @@ class ETRI_Corpus_Dataset(Dataset):
 
         if not (os.path.exists(fname)):
             return []
-
-    # avoid hanging issue
-    #   if os.path.getsize(fname) < 1 * 1024:
-    #        print('SKIP: ', fname, " - ", os.path.getsize(fname))
-    #        return []
+        
         keep_aspect_ratio = True
         try:
             if keep_aspect_ratio:
