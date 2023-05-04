@@ -10,10 +10,9 @@ class HuBert(nn.Module):
         self.model = AutoModel.from_pretrained("facebook/hubert-base-ls960")
 
     def forward(self, x):
-        input_values = self.processor(x, return_tensors="pt", sample_rate=16000, padding=True).input_values
-        outputs = self.model(input_values.squeeze(1))
-        print(outputs.output_hidden_states.shape)
-        return outputs.output_hidden_states
+        input_values = self.processor(x.squeeze(1), return_tensors="pt", sample_rate=16000, padding=True).input_values.squeeze()
+        outputs = self.model(input_values.to("cuda"))
+        return outputs.last_hidden_state
     
     def get_feature_size(self):
         return 768

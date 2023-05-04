@@ -13,7 +13,7 @@ class Audio_LSTM(nn.Module):
         x = self.mfcc_extractor(x).squeeze(1)
         x = x.permute(0, 2, 1)
         x, _ = self.lstm(x)
-        return x[:,-1]
+        return x
     
     def get_feature_size(self):
         return 13 * 2

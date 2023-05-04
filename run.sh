@@ -37,11 +37,11 @@ for i in seeds
 do
     python main.py \
     --seed ${seeds[$i]} \
-    --batch_size 240 \
+    --batch_size 30 \
     --num_workers 8 \
     --epochs 60 \
     --language Bert \
-    --audio LSTM \
+    --audio HuBert \
     --lr 0.0005 \
     --dropout 0.3 \
     --world_size $WORLD_SIZE \

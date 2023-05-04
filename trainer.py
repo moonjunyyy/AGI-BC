@@ -139,6 +139,30 @@ class Trainer:
         adam_optimizer = torch.optim.Adam(bert_params, lr=0.0005, weight_decay=0.01)
         sgd_optimizer = torch.optim.SGD(other_params, lr=0.0005, weight_decay=0.01)
 
+        for epoch in range(self.epochs//6):
+            for b, batch in enumerate(self.train_dataloader):
+                for key in batch:
+                    batch[key] = batch[key].cuda()
+
+                y = self.model(batch)
+                # Get the logit from the model
+                logit     = y["logit"]
+                if self.is_MT:
+                    sentiment = y["sentiment"]
+                
+                # Calculate the loss
+                loss = self.model.pretext_loss
+
+                loss.backward()# Update the model parameters
+                adam_optimizer.step()
+                sgd_optimizer.step()
+
+                # Zero the gradients
+                adam_optimizer.zero_grad()
+                sgd_optimizer.zero_grad()
+
+                print(loss.item())                
+                gc.collect()
         # Training loop
         for epoch in range(self.epochs):
             for b, batch in enumerate(self.train_dataloader):
@@ -199,7 +223,7 @@ class Trainer:
                 l, c = logit.argmax(dim=-1).unique(return_counts=True)
                 # for i in range(len(l)):
                 #     print(l[i].item(), ':', c[i].item(), end=' ')
-                print()
+                # print()
                 gc.collect()
             
             with torch.no_grad():
