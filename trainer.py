@@ -132,26 +132,19 @@ class Trainer:
         bert_params = []
         other_params = []
         for name, param in self.model.named_parameters():
-            if 'language_model' in name:
+            if 'language_model' in name or 'audio_model' in name:
                 bert_params.append(param)
             else:
                 other_params.append(param)
         adam_optimizer = torch.optim.Adam(bert_params, lr=0.0005, weight_decay=0.01)
         sgd_optimizer = torch.optim.SGD(other_params, lr=0.0005, weight_decay=0.01)
 
-        for epoch in range(self.epochs//6):
+        for epoch in range(10):
             for b, batch in enumerate(self.train_dataloader):
                 for key in batch:
                     batch[key] = batch[key].cuda()
 
-                y = self.model(batch)
-                # Get the logit from the model
-                logit     = y["logit"]
-                if self.is_MT:
-                    sentiment = y["sentiment"]
-                
-                # Calculate the loss
-                loss = self.model.pretext_loss
+                loss = self.model.pretext_forward(batch)
 
                 loss.backward()# Update the model parameters
                 adam_optimizer.step()
@@ -161,8 +154,10 @@ class Trainer:
                 adam_optimizer.zero_grad()
                 sgd_optimizer.zero_grad()
 
-                print(loss.item())                
+                # print(loss.item())
+                print("Epoch : {}, {}/{},  Loss : {:.6f},".format(epoch, b+1, len(self.train_dataloader), loss.item()))                
                 gc.collect()
+        torch.save(self.model.state_dict(), f"pretrained_model_{self.language}_{self.audio}.pt")
         # Training loop
         for epoch in range(self.epochs):
             for b, batch in enumerate(self.train_dataloader):

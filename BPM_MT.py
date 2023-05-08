@@ -45,6 +45,7 @@ class BPM_MT(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         # FC layer that has 128 of nodes which fed concatenated feature of audio and text
+        # self.fc_layer_1 = nn.Linear(77568, output_size)
         self.fc_layer_1 = nn.Linear(77568, output_size)
         self.relu = nn.ReLU()
         self.classifier = nn.Linear(output_size, num_class)
@@ -56,16 +57,22 @@ class BPM_MT(nn.Module):
             self.sentiment_relu = nn.ReLU()
             self.sentiment_classifier = nn.Linear(sentiment_output_size, 5)
 
-        self.audio_to_text_attention = nn.Sequential(*[CrossAttentionLayer(d_model=768, nhead=8) for _ in range(4)])
+        self.audio_downproject = nn.Linear(self.audio_feature_size, 512)
+        self.text_downproject = nn.Linear(768, 512)
+
+        self.audio_to_text_attention = nn.Sequential(*[CrossAttentionLayer(d_model=512, nhead=8) for _ in range(4)])
         self.audio_mask = nn.Parameter(torch.zeros(1, 1, self.audio_feature_size))
         
-        self.text_to_audio_attention = nn.Sequential(*[CrossAttentionLayer(d_model=self.audio_feature_size, nhead=8) for _ in range(4)])
+        self.text_to_audio_attention = nn.Sequential(*[CrossAttentionLayer(d_model=512, nhead=8) for _ in range(4)])
         self.text_mask = nn.Parameter(torch.zeros(1, 1, 768))
 
-        self.audio_decoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=self.audio_feature_size, nhead=8, batch_first=True) for _ in range(2)])
-        self.text_decoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=768, nhead=8, batch_first=True) for _ in range(2)])
+        self.audio_decoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=512, nhead=8, batch_first=True) for _ in range(2)])
+        self.text_decoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=512, nhead=8, batch_first=True) for _ in range(2)])
 
-    def forward(self, x):
+        self.audio_upproject = nn.Linear(512, self.audio_feature_size)
+        self.text_upproject = nn.Linear(512, 768)
+
+    def pretext_forward(self, x):
         audio = x["audio"]
         text  = x["text"]
         
@@ -85,19 +92,44 @@ class BPM_MT(nn.Module):
         original_audio = audio.clone()
         original_text = text.clone()
 
-        masked_audio = torch.rand_like(audio).mean(-1)<0.15
-        masked_text = torch.rand_like(text).mean(-1)<0.15
+        masked_audio = torch.rand_like(audio.mean(-1))<0.15
+        masked_text = torch.rand_like(text.mean(-1))<0.15
 
         audio[masked_audio] = self.audio_mask
         text[masked_text] = self.text_mask
+
+        # audio = self.audio_downproject(audio)
+        # text = self.text_downproject(text)
  
         for layer in self.audio_to_text_attention:
             audio = layer(audio, text)
         for layer in self.text_to_audio_attention:
             text = layer(text, audio)
-            
-        self.pretext_loss = F.mse_loss(self.audio_decoder(audio), original_audio) + F.mse_loss(self.text_decoder(text), original_text)
+        
+        audio = self.audio_decoder(audio)
+        text = self.text_decoder(text)
 
+        self.pretext_loss = F.mse_loss(audio, original_audio) + F.mse_loss(text, original_text)
+        
+        return self.pretext_loss
+
+    def forward(self, x):
+        audio = x["audio"]
+        text  = x["text"]
+        
+        # tokenize the text if tokenizer is provided
+        # if self.tokenizer is not None:
+
+        text = self.language_model(text).last_hidden_state
+        # text = text[:, 0, :]
+
+        # text = self.language_model(text).logits
+        y = {}
+        
+        # extract the MFCC feature from audio
+        # audio = self.audio_model(audio)[:,:-1,:]
+        audio = self.audio_model(audio)
+            
         x = torch.cat((audio, text), dim=1).flatten(start_dim=1)
         # print(x.shape)
         x = self.fc_layer_1(self.dropout(x))
