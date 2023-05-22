@@ -20,7 +20,7 @@ class SWBD_Dataset(Dataset):
         print("Load SWBD_Dataset...")
         self.tokenizer = tokenizer
         self.path = os.path.join(path, "swbd")
-        shutil.rmtree(self.path, ignore_errors=True)
+        # shutil.rmtree(self.path, ignore_errors=True)
         if os.path.isdir(self.path) == False:
             # os.makedirs(self.path, exist_ok=True)
             os.system(f"cp /data/datasets/swbd.tar {path}/")
@@ -96,10 +96,11 @@ class SWBD_Dataset(Dataset):
         path = os.path.join(self.path, f"{str(idx)}.wav")
         
         audio, sr = torchaudio.load(path)
-        audio = audio[role:role+1, -int(self.length*sr):]
+        audio = torchaudio.transforms.Resample(sr, 16000)(audio)
+        audio = audio[role:role+1, -int(self.length*16000):]
         # print(audio.shape)
-        if audio.size(1) != int(sr * 1.5):
-            audio = F.pad(audio, (0, int(sr * 1.5) - audio.size(1)), "constant", 0)
+        if audio.size(1) != int(16000 * 1.5):
+            audio = F.pad(audio, (0, int(16000 * 1.5) - audio.size(1)), "constant", 0)
 
         sentiment = torch.zeros(5)
         for word in trans.split(' '):
@@ -111,7 +112,7 @@ class SWBD_Dataset(Dataset):
         # print(sentiment)
 
         # Tokenize with padding into 64
-        trans = self.tokenizer(trans, padding='max_length', max_length=64, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+        trans = self.tokenizer(trans, padding='max_length', max_length=10, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 
         ret['audio'] = audio
         ret['label'] = lable

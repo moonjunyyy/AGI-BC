@@ -3,7 +3,7 @@
 #SBATCH -J BPM_MT
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=16
-#SBATCH --mem-per-gpu=24G
+#SBATCH --mem-per-gpu=60G
 #SBATCH --time=4-0
 #SBATCH -o %x_%j_%a.out
 #SBATCH -e %x_%j_%a.err

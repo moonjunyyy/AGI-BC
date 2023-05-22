@@ -136,10 +136,10 @@ class Trainer:
                 bert_params.append(param)
             else:
                 other_params.append(param)
-        adam_optimizer = torch.optim.Adam(bert_params, lr=0.0005, weight_decay=0.01)
-        sgd_optimizer = torch.optim.SGD(other_params, lr=0.0005, weight_decay=0.01)
+        adam_optimizer = torch.optim.Adam(other_params, lr=0.0005, weight_decay=0.01)
+        sgd_optimizer = torch.optim.SGD(bert_params, lr=0.0005, weight_decay=0.01)
 
-        for epoch in range(10):
+        for epoch in range(self.epochs//6):
             for b, batch in enumerate(self.train_dataloader):
                 for key in batch:
                     batch[key] = batch[key].cuda()
@@ -158,6 +158,13 @@ class Trainer:
                 print("Epoch : {}, {}/{},  Loss : {:.6f},".format(epoch, b+1, len(self.train_dataloader), loss.item()))                
                 gc.collect()
         torch.save(self.model.state_dict(), f"pretrained_model_{self.language}_{self.audio}.pt")
+
+        for name, param in self.model.named_parameters():
+            if 'fc_layer' in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
         # Training loop
         for epoch in range(self.epochs):
             for b, batch in enumerate(self.train_dataloader):
@@ -201,6 +208,7 @@ class Trainer:
                 # loss = (loss * unq).mean()
                 # loss = (loss * batch_distance).mean()
                 loss = loss.mean()
+                
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
                 # Backpropagation
