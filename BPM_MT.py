@@ -43,10 +43,10 @@ class BPM_MT(nn.Module):
         self.dropout = nn.Dropout(dropout)
         # FC layer that has 128 of nodes which fed concatenated feature of audio and text
         # self.fc_layer_1 = nn.Linear(77568, output_size)
-        self.fc_layer_1 = nn.Linear(768*84, output_size * 16)
+        self.fc_layer_1 = nn.Linear(768*84, output_size * 4)
         # self.fc_layer_1 = nn.Linear(36096, output_size)
-        self.fc_layer_2 = nn.Linear(output_size * 16, output_size * 4)
-        self.fc_layer_3 = nn.Linear(output_size * 4, output_size)
+        self.fc_layer_2 = nn.Linear(output_size * 4, output_size)
+        # self.fc_layer_3 = nn.Linear(output_size * 4, output_size)
         self.relu = nn.ReLU()
         self.classifier = nn.Linear(output_size, num_class)
 
@@ -57,20 +57,20 @@ class BPM_MT(nn.Module):
             self.sentiment_relu = nn.ReLU()
             self.sentiment_classifier = nn.Linear(sentiment_output_size, 5)
 
-        self.audio_downproject = nn.Linear(self.audio_feature_size, 192)
-        self.text_downproject = nn.Linear(768, 192)
+        self.audio_downproject = nn.Linear(self.audio_feature_size, 256)
+        self.text_downproject = nn.Linear(768, 256)
 
-        self.audio_to_text_attention = nn.Sequential(*[CrossAttentionLayer(d_model=768, nhead=8, dropout=dropout) for _ in range(12)])
+        self.audio_to_text_attention = nn.Sequential(*[CrossAttentionLayer(d_model=768, nhead=8, dropout=dropout) for _ in range(8)])
         self.audio_mask = nn.Parameter(torch.zeros(1, 1, self.audio_feature_size))
         
-        self.text_to_audio_attention = nn.Sequential(*[CrossAttentionLayer(d_model=768, nhead=8, dropout=dropout) for _ in range(12)])
+        self.text_to_audio_attention = nn.Sequential(*[CrossAttentionLayer(d_model=768, nhead=8, dropout=dropout) for _ in range(8)])
         self.text_mask = nn.Parameter(torch.zeros(1, 1, 768))
 
-        self.audio_decoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=192, nhead=4, batch_first=True) for _ in range(3)])
-        self.text_decoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=192, nhead=4, batch_first=True) for _ in range(3)])
+        self.audio_decoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=256, nhead=4, batch_first=True) for _ in range(2)])
+        self.text_decoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=256, nhead=4, batch_first=True) for _ in range(2)])
 
-        self.audio_predictor = nn.Linear(192*74, 24000)
-        self.text_predictor = nn.Linear(192, 30522)
+        self.audio_predictor = nn.Linear(256*74, 24000)
+        self.text_predictor = nn.Linear(256, 30522)
 
     def pretext_forward(self, x):
         audio = x["audio"]
@@ -170,8 +170,8 @@ class BPM_MT(nn.Module):
         x = self.relu(x)
         x = self.fc_layer_2(self.dropout(x))
         x = self.relu(x)
-        x = self.fc_layer_3(self.dropout(x))
-        x = self.relu(x)
+        # x = self.fc_layer_3(self.dropout(x))
+        # x = self.relu(x)
         y["logit"] = self.classifier(self.dropout(x))
 
         if self.is_MT:
