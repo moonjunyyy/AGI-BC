@@ -23,6 +23,8 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--dist_backend', type=str, default='nccl')
+    parser.add_argument('--dist_url', type=str, default='tcp://')
     args = parser.parse_args()
 
     trainer = Trainer(args)

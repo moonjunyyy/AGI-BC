@@ -11,7 +11,8 @@ class HuBert(nn.Module):
 
     def forward(self, x):
         input_values = self.processor(x.squeeze(1), return_tensors="pt", sample_rate=16000, padding=True).input_values.squeeze()
-        outputs = self.model(input_values.to("cuda"))
+        device = self.model.parameters().__next__().device
+        outputs = self.model(input_values.to(device))
         return outputs.last_hidden_state
     
     def get_feature_size(self):

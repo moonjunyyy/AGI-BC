@@ -35,6 +35,14 @@ class Trainer:
         self.language = args.language
         self.audio = args.audio
 
+        self.ngpus_per_nodes = torch.cuda.device_count()
+        self.node_rank = args.rank
+        self.dist_backend = args.dist_backend
+
+        self.master_addr = os.environ.get("MASTER_ADDR", "localhost")
+        self.master_port = os.environ.get("MASTER_PORT", "8888")
+        self.dist_url = f"{args.dist_url}{self.master_addr}:{self.master_port}"
+
         self.seed = args.seed
         self.distributed = False
         self.rank = args.rank
@@ -103,6 +111,8 @@ class Trainer:
             audio_model = HuBert()
 
         tf = transforms.ToTensor()
+        audio_model = audio_model.to(self.local_rank)
+        bert = bert.to(self.local_rank)
 
         if self.language == 'koBert':
             dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, transform=tf, length=1.5)
@@ -126,7 +136,7 @@ class Trainer:
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
         if self.distributed:
-            self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.local_rank], output_device=self.local_rank)
+            self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.local_rank], output_device=self.local_rank, find_unused_parameters=True)
 
         # Get the model parameters divided into two groups : bert and others
         bert_params = []
@@ -139,12 +149,12 @@ class Trainer:
         adam_optimizer = torch.optim.Adam(other_params, lr=0.0005, weight_decay=0.01)
         sgd_optimizer = torch.optim.SGD(bert_params, lr=0.0005, weight_decay=0.01)
 
-        for epoch in range(self.epochs//6):
+        for epoch in range(self.epochs//12):
             for b, batch in enumerate(self.train_dataloader):
                 for key in batch:
-                    batch[key] = batch[key].cuda()
+                    batch[key] = batch[key].to(self.local_rank)
 
-                loss = self.model.pretext_forward(batch)
+                loss = self.model_without_ddp.pretext_forward(batch)
 
                 loss.backward()# Update the model parameters
                 adam_optimizer.step()
@@ -170,7 +180,7 @@ class Trainer:
             for b, batch in enumerate(self.train_dataloader):
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
-                    batch[key] = batch[key].cuda()
+                    batch[key] = batch[key].to(self.local_rank)
 
                 y = self.model(batch)
                 # Get the logit from the model
@@ -216,11 +226,11 @@ class Trainer:
 
                 # Update the model parameters
                 adam_optimizer.step()
-                sgd_optimizer.step()
+                # sgd_optimizer.step()
 
                 # Zero the gradients
                 adam_optimizer.zero_grad()
-                sgd_optimizer.zero_grad()
+                # sgd_optimizer.zero_grad()
 
                 # print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
                 l, c = logit.argmax(dim=-1).unique(return_counts=True)
@@ -242,7 +252,7 @@ class Trainer:
                 for batch in self.val_dataloader:
                     # Move the batch to GPU if CUDA is available
                     for key in batch:
-                        batch[key] = batch[key].cuda()
+                        batch[key] = batch[key].to(self.local_rank)
                     y = self.model(batch)
 
                     # Get the logit from the model
@@ -254,13 +264,13 @@ class Trainer:
                     loss_BC = F.cross_entropy(logit, batch["label"])
                     if self.is_MT:
                         loss_SP = F.binary_cross_entropy(torch.sigmoid(sentiment), batch["sentiment"])
-                        loss = 0.9 * loss_BC +  0.1 * loss_SP
+                        loss_t = 0.9 * loss_BC +  0.1 * loss_SP
                     else:
-                        loss = loss_BC
+                        loss_t = loss_BC
 
                     # Calculate the accuracy
-                    accuracy += (torch.argmax(logit, dim=1) == batch["label"]).sum().item()
-                    loss    += loss.item() * len(batch["label"])
+                    accuracy += (torch.argmax(logit, dim=1) == batch["label"]).float().sum()
+                    loss     += loss_t * len(batch["label"])
 
                     # Calculate the confusion matrix
                     for i in range(len(batch["label"])):
@@ -276,19 +286,34 @@ class Trainer:
                                 else:
                                     tn[l] += 1
 
-                    if self.distributed:
-                        dist.all_reduce(accuracy, op=dist.ReduceOp.SUM)
-                        dist.all_reduce(loss, op=dist.ReduceOp.SUM)
-                        dist.all_reduce(tp, op=dist.ReduceOp.SUM)
-                        dist.all_reduce(fp, op=dist.ReduceOp.SUM)
-                        dist.all_reduce(fn, op=dist.ReduceOp.SUM)
-                        dist.all_reduce(tn, op=dist.ReduceOp.SUM)
+                if self.distributed:
+                    accuracy = accuracy.to(self.local_rank)
+                    loss     = loss.to(self.local_rank)
+                    tp = tp.to(self.local_rank)
+                    fp = fp.to(self.local_rank)
+                    fn = fn.to(self.local_rank)
+                    tn = tn.to(self.local_rank)
+
+                    dist.all_reduce(accuracy, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(tp, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(fp, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(fn, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(tn, op=dist.ReduceOp.SUM)
+
+                    accuracy = accuracy.cpu()
+                    loss     = loss.cpu()
+                    tp = tp.cpu()
+                    fp = fp.cpu()
+                    fn = fn.cpu()
+                    tn = tn.cpu()
+                    
                 accuracy /= len(self.val_dataset)
                 loss     /= len(self.val_dataset)
                 precision = tp / (tp + fp)
                 recall    = tp / (tp + fn)
                 f1_score  = 2 * precision * recall / (precision + recall)
-                print("Epoch : {}, Accuracy : {}, Loss : {}, F1 score : {}".format(epoch, accuracy, loss, f1_score.cpu().tolist()))
+                print("Epoch : {}, Accuracy : {}, Loss : {}, F1 score : {}".format(epoch, accuracy.item(), loss.item(), f1_score.cpu().tolist()))
             gc.collect()
         
 

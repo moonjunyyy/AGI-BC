@@ -37,7 +37,7 @@ for i in seeds
 do
     python main.py \
     --seed ${seeds[$i]} \
-    --batch_size 64 \
+    --batch_size 32 \
     --num_workers 8 \
     --epochs 60 \
     --language koBert \
