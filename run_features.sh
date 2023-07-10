@@ -32,14 +32,14 @@ mode=${1}
 
 seeds=(1 21 42 3473 10741 32450 93462 85015 64648 71950 87557 99668 55552 4811 10741)
 
-export JAVA_HOME=dirname $(readlink -f $(which java))
+# export JAVA_HOME=dirname$(readlink -f $(which java))
 export PATH=$PATH:$JAVA_HOME
 export CUDA_LAUNCH_BLOCKING=1
 
 for i in seeds
 do
-    python main.py \
-    --mode ${mode} \
+    python feature_tsne.py \
+    --mode None \
     --seed ${seeds[$i]} \
     --batch_size 64 \
     --num_workers 8 \

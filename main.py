@@ -1,10 +1,13 @@
 import argparse
+import torch
 from trainer import Trainer
+from rl_trainer import RLTrainer
 
 is_MT = True    # True for MT, False for ST
 use_CUDA = True # True for GPU, False for CPU
 batch_size = 64 # Batch size
 epochs = 60     # Number of epochs
+torch.autograd.set_detect_anomaly(True)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -25,9 +28,13 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--dist_backend', type=str, default='nccl')
     parser.add_argument('--dist_url', type=str, default='tcp://')
+    parser.add_argument('--mode', type=str, default='cross_entropy')
     args = parser.parse_args()
 
-    trainer = Trainer(args)
+    if args.model == 'BPM_RL':
+        trainer = RLTrainer(args)
+    else:   
+        trainer = Trainer(args)
     trainer.run()
     pass
 

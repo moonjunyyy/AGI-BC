@@ -1,5 +1,6 @@
 import os
 import gc
+import sys
 import time
 import torch
 import torch.nn.functional as F
@@ -8,7 +9,7 @@ import torch.multiprocessing as mp
 import random
 import torch.backends.cudnn as cudnn
 import numpy as np
-from BPM_MT import BPM_MT
+from BPM_RL import BPM_RL
 import json
 import torch
 import torch.nn.functional as F
@@ -16,30 +17,15 @@ import torch.nn.functional as F
 from transformers import BertModel, AutoTokenizer
 import torchvision.transforms as transforms
 from torch.utils.data import Subset
-from ETRI_Dataset import ETRI_Corpus_Dataset
-from SWBD_Dataset import SWBD_Dataset
+from ETRI_Word_Dataset import ETRI_Word_Dataset
 from HuBert import HuBert
 from Audio_LSTM import Audio_LSTM
 
 from transformers import AutoTokenizer, AutoModelForPreTraining
 
-class Trainer:
+class RLTrainer:
     def __init__(self, args) -> None:
         print(args)
-
-        self.mode = args.mode
-        self.loss_functions = {
-            "focal": self._focal_loss,
-            "counting": self._counting_loss,
-            "hierarchical": self._hierarchical_loss,
-            "no_one_left_behind": self._no_one_left_behind,
-            "mean_pooling": self._cross_entropy_loss,
-            "audio_only" : self._cross_entropy_loss,
-            "text_only" : self._cross_entropy_loss,
-            "flatten" : self._cross_entropy_loss,
-        }
-        self.criteria = self.loss_functions[self.mode]
-
         self.model = args.model
         self.num_workers = args.num_workers
         self.batch_size = args.batch_size
@@ -105,7 +91,7 @@ class Trainer:
             tokenizer = AutoTokenizer.from_pretrained('skt/kobert-base-v1')
             bert = BertModel.from_pretrained("skt/kobert-base-v1", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
             sentiment_dict = json.load(open('data/SentiWord_info.json', encoding='utf-8-sig', mode='r'))
-            self.num_class = 4
+            self.num_class = 5
         elif self.language == 'Bert':
             tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
             bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
@@ -122,15 +108,16 @@ class Trainer:
         if self.audio == 'LSTM':
             audio_model = Audio_LSTM()
         elif self.audio == 'HuBert':
-            audio_model = HuBert(sample_rate=16000)
+            audio_model = HuBert()
 
         tf = transforms.ToTensor()
         audio_model = audio_model.to(self.local_rank)
         bert = bert.to(self.local_rank)
 
         if self.language == 'koBert':
-            dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, transform=tf, length=1.5)
+            dataset = ETRI_Word_Dataset(path = '/local_datasets', tokenizer=tokenizer, transform=tf, length=1.5)
         else :
+            exit()
             dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, length=1.5)
 
         # for name, module in audio_model.named_modules():
@@ -139,14 +126,8 @@ class Trainer:
         # for name, module in bert.named_modules():
         #     print(name)
 
-        # select from dataset label 2 and 3
-        subset = []
-        for i, b in enumerate(dataset):
-            if b['label'] == 2 or b['label'] == 3:
-                subset.append(i)
-        dataset = Subset(dataset, subset)
-
-        self.num_class = 2
+        # for d in dataset:
+        #     print(d)
 
         self.train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
         self.val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
@@ -157,11 +138,10 @@ class Trainer:
         self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
 
-
         if self.is_MT:
-            self.model = BPM_MT(language_model=bert, audio_model=audio_model, sentiment_dict=sentiment_dict, num_class=self.num_class, mode=self.mode)
+            self.model = BPM_RL(language_model=bert, audio_model=audio_model, sentiment_dict=sentiment_dict, num_class=self.num_class)
         else:
-            self.model = BPM_MT(language_model=bert, audio_model=audio_model, sentiment_dict=None, num_class=self.num_class, mode=self.mode)
+            self.model = BPM_RL(language_model=bert, audio_model=audio_model, sentiment_dict=None, num_class=self.num_class)
         
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
@@ -185,43 +165,25 @@ class Trainer:
         fc_optimizer = torch.optim.Adam(fc_params, lr=0.0005, weight_decay=0.01)
         sgd_optimizer = torch.optim.SGD(bert_params, lr=0.0005)
 
-        # for epoch in range(self.epochs//2):
-        #     for b, batch in enumerate(self.train_dataloader):
-        #          # Move the batch to GPU if CUDA is available
-        #         for key in batch:
-        #             batch[key] = batch[key].to(self.local_rank)
-
-        #         loss = self.model.pretext_forward(batch)
-
-        #         # Zero the gradients
-        #         adam_optimizer.zero_grad()
-        #         sgd_optimizer.zero_grad()
-        #         fc_optimizer.zero_grad()
-
-        #         # Backpropagation
-        #         loss.backward()
-
-        #         # Update the model parameters
-        #         adam_optimizer.step()
-        #         sgd_optimizer.step()
-        #         fc_optimizer.step()
-
-        #         print("Epoch : {}, {}/{},  Loss : {:.6f},".format(epoch, b+1, len(self.train_dataloader), loss.item()), end=' ')
-        #         gc.collect()
-
+        # Training loop
         for epoch in range(self.epochs):
             for b, batch in enumerate(self.train_dataloader):
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
                     batch[key] = batch[key].to(self.local_rank)
-                batch['label'] = batch['label'] - 2
+                
+                batch['label'] = torch.where(batch['label']!=5, batch['label'], 4)
 
                 y = self.model(batch)
-                
-                loss, logit = self.criteria(batch, y)
+                # Get the logit from the model
+                loss = y["loss"]
+
+                # unique, count = batch['label'].unique(return_counts=True)
+                # count = count[(unique == batch['label'].unsqueeze(1)).nonzero()[:,1]]
+                # loss = loss / count * len(batch['label'])
                 loss = loss.mean()
-                
-                accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
+                logit = y["pred"]
+                accuracy = (logit.argmax(dim=-1) == batch["label"][:,-1]).float().mean()
 
                 # Zero the gradients
                 adam_optimizer.zero_grad()
@@ -229,15 +191,16 @@ class Trainer:
                 fc_optimizer.zero_grad()
 
                 # Backpropagation
-                # y['modalities'].backward(retain_graph=True)
-                # loss.backward()
+                loss.backward()
 
                 # Update the model parameters
-                adam_optimizer.step()
-                sgd_optimizer.step()
+                # adam_optimizer.step()
+                # sgd_optimizer.step()
                 fc_optimizer.step()
 
-                # print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
+                # if b % 100 == 99 or b == len(self.train_dataloader) - 1:
+                print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100))
+                sys.stdout.flush()
                 l, c = logit.argmax(dim=-1).unique(return_counts=True)
                 # for i in range(len(l)):
                 #     print(l[i].item(), ':', c[i].item(), end=' ')
@@ -258,21 +221,25 @@ class Trainer:
                     # Move the batch to GPU if CUDA is available
                     for key in batch:
                         batch[key] = batch[key].to(self.local_rank)
-                    batch['label'] = batch['label'] - 2
-                    
+                
+                    batch['label'] = torch.where(batch['label']!=5, batch['label'], 4)
+
                     y = self.model(batch)
+                    # Get the logit from the model
+                    loss_t = y["loss"]
 
-                    loss_t, logit = self.criteria(batch, y) 
-                    loss_t = loss_t.mean()
-
-                    # Calculate the accuracy
-                    accuracy += (torch.argmax(logit, dim=1) == batch["label"]).float().sum()
+                    # unique, count = batch['label'].unique(return_counts=True)
+                    # count = count[(unique == batch['label'].unsqueeze(1)).nonzero()[:,1]]
+                    # loss = loss / count * len(batch['label'])
+                    # loss = loss.mean()
+                    logit = y["pred"]
+                    accuracy = (logit.argmax(dim=-1) == batch["label"][:,-1]).float().mean()
                     loss     += loss_t * len(batch["label"])
 
                     # Calculate the confusion matrix
                     for i in range(len(batch["label"])):
                         for l in range(self.num_class):
-                            if batch["label"][i] == l:
+                            if batch["label"][-1, i] == l:
                                 if logit.argmax(dim=-1)[i] == l:
                                     tp[l] += 1
                                 else:
@@ -311,6 +278,7 @@ class Trainer:
                 recall    = tp / (tp + fn)
                 f1_score  = 2 * precision * recall / (precision + recall)
                 print("Epoch : {}, Accuracy : {}, Loss : {}, F1 score : {}".format(epoch, accuracy.item(), loss.item(), f1_score.cpu().tolist()))
+                sys.stdout.flush()
             gc.collect()
         
 
@@ -358,64 +326,3 @@ class Trainer:
             return dist.get_world_size()
         return 1
     
-    def _focal_loss(self, batch, output):
-        gamma = 2
-        softmax = F.softmax(output['logit'], dim=-1)
-        loss = softmax[torch.arange(len(batch['label'])), batch['label']]
-        loss = - (1 - loss) ** gamma * (loss + 1e-6).log()
-        return loss, output['logit']
-
-    def _counting_loss(self, batch, output):
-        unique, count = batch['label'].unique(return_counts=True)
-        count = count[(unique == batch['label'].unsqueeze(1)).nonzero()[:,1]]
-        loss = F.cross_entropy(output['logit'], batch["label"], reduction='none')        
-        loss = loss / count * len(batch['label'])
-        return loss.mean(), output['logit']
-
-    def _hierarchical_loss(self, batch, output):
-        logit = output['logit']
-        BC_logit = output['logit_BC']
-        
-        bc_loss = F.cross_entropy(BC_logit, (batch['label'] > 0).long(), reduction='none')
-        logit = logit[batch['label'] > 0]
-        loss = F.cross_entropy(logit, batch["label"][batch['label'] > 0] - 1, reduction='none')
-        loss = loss.mean() + bc_loss.mean()
-
-        softmax = F.softmax(output["logit"], dim=-1)
-        BC_softmax = F.softmax(output["logit_BC"], dim=-1)
-        logit = torch.cat((
-            BC_softmax[:,:1], BC_softmax[:,1:] * softmax
-        ),dim=1)
-        return loss, logit
-    
-    def _no_one_left_behind(self, batch, output):
-        unique, count = batch['label'].unique(return_counts=True)
-        logit = output['logit']
-        logit = logit - logit.max(dim=-1, keepdim=True)[0]
-        logit = logit.exp()
-        
-        cnt = torch.zeros(logit.shape[0], device=self.local_rank)
-        for c in range(self.num_class):
-            if c in unique:
-                cnt[batch['label'] == c] = count[unique == c].item()
-            else:
-                cnt[batch['label'] == c] = 0
-        logit = logit * cnt.unsqueeze(-1)
-        p = logit[torch.arange(len(batch['label'])), batch['label']]
-        logit = p / logit.sum(dim=-1)
-        logit = logit.squeeze()
-
-        loss = 0
-        for c, u in enumerate(unique):
-            loss = loss - torch.log(logit[batch["label"] == u] + 1e-6).sum() / count[c]
-        loss = loss / u
-        return loss, output['logit']
-    
-    def _cross_entropy_loss(self, batch, output):
-        loss_BC = F.cross_entropy(output['logit'], batch["label"], reduction='none')
-        if self.is_MT:
-            loss_SP = F.binary_cross_entropy(torch.sigmoid(output['sentiment']), batch["sentiment"])
-            loss = 0.9 * loss_BC + 0.1 * loss_SP
-        else:
-            loss = loss_BC
-        return loss.mean(), output['logit']

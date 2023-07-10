@@ -1,9 +1,9 @@
 #!/bin/bash
 
 #SBATCH -J BPM_MT
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-gpu=16
-#SBATCH --mem-per-gpu=60G
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-gpu=8
+#SBATCH --mem-per-gpu=24G
 #SBATCH --time=4-0
 #SBATCH -o %x_%j_%a.out
 #SBATCH -e %x_%j_%a.err
