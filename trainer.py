@@ -2,6 +2,7 @@ import os
 import gc
 import time
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -22,6 +23,7 @@ from HuBert import HuBert
 from Audio_LSTM import Audio_LSTM
 
 from transformers import AutoTokenizer, AutoModelForPreTraining
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 class Trainer:
     def __init__(self, args) -> None:
@@ -140,13 +142,26 @@ class Trainer:
         #     print(name)
 
         # select from dataset label 2 and 3
-        subset = []
-        for i, b in enumerate(dataset):
-            if b['label'] == 2 or b['label'] == 3:
-                subset.append(i)
-        dataset = Subset(dataset, subset)
+        # NoBC = []
+        # Continuer = []
+        # Understanding = []
+        # Empathic = []
+        # for i, b in enumerate(dataset):
+        #     if b['label'] == 0:
+        #         NoBC.append(i)
+        #     elif b['label'] == 1:
+        #         Continuer.append(i)
+        #     elif b['label'] == 2:
+        #         Understanding.append(i)
+        #     elif b['label'] == 3:
+        #         Empathic.append(i)
 
-        self.num_class = 2
+        # Understanding = random.sample(Understanding, len(Empathic))
+        # subset = Understanding + Empathic
+        # random.shuffle(subset)
+        # dataset = Subset(dataset, subset)
+
+        # self.num_class = 2
 
         self.train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
         self.val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
@@ -172,55 +187,98 @@ class Trainer:
         bert_params = []
         other_params = []
         fc_params = []
+        discriminator_params = []
 
         for name, param in self.model.named_parameters():
             if 'language_model' in name or 'audio_model' in name:
                 bert_params.append(param)
             elif 'fc_layer' in name or 'prompt' in name or 'classifier' in name:
                 fc_params.append(param)
+            elif 'discriminator' in name:
+                discriminator_params.append(param)
             else:
                 other_params.append(param)
 
-        adam_optimizer = torch.optim.Adam(other_params, lr=0.0005, weight_decay=0.01)
-        fc_optimizer = torch.optim.Adam(fc_params, lr=0.0005, weight_decay=0.01)
+        adam_optimizer = torch.optim.Adam(other_params, lr=0.0005, weight_decay=5e-4)
+        fc_optimizer = torch.optim.Adam(fc_params, lr=0.0005, weight_decay=5e-4)
         sgd_optimizer = torch.optim.SGD(bert_params, lr=0.0005)
 
-        # for epoch in range(self.epochs//2):
+        # for epoch in range(self.epochs):
         #     for b, batch in enumerate(self.train_dataloader):
-        #          # Move the batch to GPU if CUDA is available
+        #         # Move the batch to GPU if CUDA is available
         #         for key in batch:
         #             batch[key] = batch[key].to(self.local_rank)
 
-        #         loss = self.model.pretext_forward(batch)
+        #         y = self.model.text_forward(batch)
+                
+        #         loss, logit = self.criteria(batch, y)
+        #         loss = loss.mean()
+            
+        #         accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
         #         # Zero the gradients
         #         adam_optimizer.zero_grad()
         #         sgd_optimizer.zero_grad()
         #         fc_optimizer.zero_grad()
+        #         discriminator_optimizer.zero_grad()
 
         #         # Backpropagation
+        #         loss = loss# + 0.5 * y['modalities']
         #         loss.backward()
 
-        #         # Update the model parameters
         #         adam_optimizer.step()
-        #         sgd_optimizer.step()
+        #         # sgd_optimizer.step()
         #         fc_optimizer.step()
 
-        #         print("Epoch : {}, {}/{},  Loss : {:.6f},".format(epoch, b+1, len(self.train_dataloader), loss.item()), end=' ')
+        #         print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
+        #         # print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
+        #         l, c = logit.argmax(dim=-1).unique(return_counts=True)
+        #         # for i in range(len(l)):
+        #         #     print(l[i].item(), ':', c[i].item(), end=' ')
+        #         # print()
         #         gc.collect()
+        #     print()
+        # self.model.text_prompt_keys.requires_grad_(False)
+        # self.model.text_prompt_values.requires_grad_(False)
+
+        pretext_loss = 0
+        pretext_count = 0
+
+        # for epoch in range(self.epochs):
+        #     for b, batch in enumerate(self.train_dataloader):
+        #         for key in batch:
+        #             batch[key] = batch[key].to(self.local_rank)
+                
+        #         y = self.model.pretext_forward(batch)
+                
+        #         adam_optimizer.zero_grad()
+        #         sgd_optimizer.zero_grad()
+        #         fc_optimizer.zero_grad()
+
+        #         y.backward()
+
+        #         adam_optimizer.step()
+        #         # sgd_optimizer.step()
+        #         fc_optimizer.step()
+
+        #         pretext_loss += y.item() * len(batch['label'])
+        #         pretext_count += len(batch['label'])
+
+        #         print("Epoch : {}, {}/{},  Loss : {:.6f},".format(epoch, b+1, len(self.train_dataloader), y.item()), end='\r')
+        #         gc.collect()
+        #     print(f"Epoch : {epoch}, Pretext loss : {pretext_loss / pretext_count}")
 
         for epoch in range(self.epochs):
             for b, batch in enumerate(self.train_dataloader):
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
                     batch[key] = batch[key].to(self.local_rank)
-                batch['label'] = batch['label'] - 2
+                # batch['label'] = batch['label'] - 2
 
-                y = self.model(batch)
-                
+                y = self.model.forward(batch)
                 loss, logit = self.criteria(batch, y)
                 loss = loss.mean()
-                
+            
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
                 # Zero the gradients
@@ -229,21 +287,22 @@ class Trainer:
                 fc_optimizer.zero_grad()
 
                 # Backpropagation
-                # y['modalities'].backward(retain_graph=True)
-                # loss.backward()
+                loss = loss #+ 0.5 * y['modalities']
+                loss.backward()
 
                 # Update the model parameters
                 adam_optimizer.step()
                 sgd_optimizer.step()
                 fc_optimizer.step()
 
+                print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
                 # print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
                 l, c = logit.argmax(dim=-1).unique(return_counts=True)
                 # for i in range(len(l)):
                 #     print(l[i].item(), ':', c[i].item(), end=' ')
                 # print()
                 gc.collect()
-            
+
             with torch.no_grad():
                 # Validation loop
                 accuracy = 0
@@ -258,11 +317,11 @@ class Trainer:
                     # Move the batch to GPU if CUDA is available
                     for key in batch:
                         batch[key] = batch[key].to(self.local_rank)
-                    batch['label'] = batch['label'] - 2
+                    # batch['label'] = batch['label'] - 2
                     
                     y = self.model(batch)
 
-                    loss_t, logit = self.criteria(batch, y) 
+                    loss_t, logit = self.criteria(batch, y)
                     loss_t = loss_t.mean()
 
                     # Calculate the accuracy
@@ -313,7 +372,6 @@ class Trainer:
                 print("Epoch : {}, Accuracy : {}, Loss : {}, F1 score : {}".format(epoch, accuracy.item(), loss.item(), f1_score.cpu().tolist()))
             gc.collect()
         
-
     def init_distributed(self):
         if self.distributed:
             if torch.cuda.is_available():

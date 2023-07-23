@@ -43,7 +43,7 @@ do
     --seed ${seeds[$i]} \
     --batch_size 64 \
     --num_workers 8 \
-    --epochs 20 \
+    --epochs 200 \
     --language koBert \
     --audio HuBert \
     --lr 0.0005 \
