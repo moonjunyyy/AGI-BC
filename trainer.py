@@ -9,7 +9,7 @@ import torch.multiprocessing as mp
 import random
 import torch.backends.cudnn as cudnn
 import numpy as np
-from BPM_MT import BPM_MT
+from BPM_MT import BPM_MT, Ours
 import json
 import torch
 import torch.nn.functional as F
@@ -22,8 +22,17 @@ from SWBD_Dataset import SWBD_Dataset
 from HuBert import HuBert
 from Audio_LSTM import Audio_LSTM
 
+from kobert.pytorch_kobert import get_pytorch_kobert_model
+from kobert_tokenizer import KoBERTTokenizer
+
 from transformers import AutoTokenizer, AutoModelForPreTraining
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+model_dict = {
+    'BPM_MT': BPM_MT,
+    'BPM_ST': BPM_MT,
+    'Ours'  : Ours,
+}
 
 class Trainer:
     def __init__(self, args) -> None:
@@ -104,8 +113,8 @@ class Trainer:
                 
         
         if self.language == 'koBert':
-            tokenizer = AutoTokenizer.from_pretrained('skt/kobert-base-v1')
-            bert = BertModel.from_pretrained("skt/kobert-base-v1", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
+            bert, vocab = get_pytorch_kobert_model()
+            tokenizer = KoBERTTokenizer.from_pretrained('skt/kobert-base-v1')
             sentiment_dict = json.load(open('data/SentiWord_info.json', encoding='utf-8-sig', mode='r'))
             self.num_class = 4
         elif self.language == 'Bert':
@@ -131,10 +140,13 @@ class Trainer:
         bert = bert.to(self.local_rank)
 
         if self.language == 'koBert':
-            dataset = ETRI_Corpus_Dataset(path = '/local_datasets', tokenizer=tokenizer, transform=tf, length=1.5)
+            self.train_dataset = ETRI_Corpus_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, transform=tf, length=1.5)
+            self.val_dataset = ETRI_Corpus_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer, transform=tf, length=1.5)
         else :
             dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, length=1.5)
-
+            self.train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
+            self.val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
+            
         # for name, module in audio_model.named_modules():
         #     print(name)
 
@@ -156,28 +168,30 @@ class Trainer:
         #     elif b['label'] == 3:
         #         Empathic.append(i)
 
-        # Understanding = random.sample(Understanding, len(Empathic))
+        # NoBC = random.sample(NoBC, len(Continuer) + len(Understanding) + len(Empathic))
         # subset = Understanding + Empathic
         # random.shuffle(subset)
         # dataset = Subset(dataset, subset)
 
+        # print(len(NoBC), len(Continuer), len(Understanding), len(Empathic))
+
+        # Understanding = random.sample(Understanding, len(Empathic))
+
         # self.num_class = 2
-
-        self.train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
-        self.val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
-
+        
         self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset, shuffle=True, num_replicas=self.world_size, rank=self.rank)
         self.val_sampler = torch.utils.data.distributed.DistributedSampler(self.val_dataset, shuffle=False, num_replicas=self.world_size, rank=self.rank)
 
         self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
 
-
-        if self.is_MT:
+        if self.model == 'BPM_MT':        
             self.model = BPM_MT(language_model=bert, audio_model=audio_model, sentiment_dict=sentiment_dict, num_class=self.num_class, mode=self.mode)
-        else:
+        elif self.model == 'BPM_ST':
             self.model = BPM_MT(language_model=bert, audio_model=audio_model, sentiment_dict=None, num_class=self.num_class, mode=self.mode)
-        
+        elif self.model == 'Ours':
+            self.model = Ours(language_model=bert, audio_model=audio_model, sentiment_dict=None, num_class=self.num_class, mode=self.mode)
+
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
         if self.distributed:
@@ -188,89 +202,52 @@ class Trainer:
         other_params = []
         fc_params = []
         discriminator_params = []
+        prompt_params = []
 
         for name, param in self.model.named_parameters():
             if 'language_model' in name or 'audio_model' in name:
                 bert_params.append(param)
-            elif 'fc_layer' in name or 'prompt' in name or 'classifier' in name:
-                fc_params.append(param)
-            elif 'discriminator' in name:
-                discriminator_params.append(param)
+            elif 'prompt' in name:
+                prompt_params.append(param)
             else:
                 other_params.append(param)
 
-        adam_optimizer = torch.optim.Adam(other_params, lr=0.0005, weight_decay=5e-4)
-        fc_optimizer = torch.optim.Adam(fc_params, lr=0.0005, weight_decay=5e-4)
+        adam_optimizer = torch.optim.Adam(other_params, lr=0.0005, weight_decay=5e-3)
         sgd_optimizer = torch.optim.SGD(bert_params, lr=0.0005)
+        if prompt_params != []:
+            adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0005})
 
-        # for epoch in range(self.epochs):
-        #     for b, batch in enumerate(self.train_dataloader):
-        #         # Move the batch to GPU if CUDA is available
-        #         for key in batch:
-        #             batch[key] = batch[key].to(self.local_rank)
-
-        #         y = self.model.text_forward(batch)
-                
-        #         loss, logit = self.criteria(batch, y)
-        #         loss = loss.mean()
-            
-        #         accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
-
-        #         # Zero the gradients
-        #         adam_optimizer.zero_grad()
-        #         sgd_optimizer.zero_grad()
-        #         fc_optimizer.zero_grad()
-        #         discriminator_optimizer.zero_grad()
-
-        #         # Backpropagation
-        #         loss = loss# + 0.5 * y['modalities']
-        #         loss.backward()
-
-        #         adam_optimizer.step()
-        #         # sgd_optimizer.step()
-        #         fc_optimizer.step()
-
-        #         print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
-        #         # print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')
-        #         l, c = logit.argmax(dim=-1).unique(return_counts=True)
-        #         # for i in range(len(l)):
-        #         #     print(l[i].item(), ':', c[i].item(), end=' ')
-        #         # print()
-        #         gc.collect()
-        #     print()
-        # self.model.text_prompt_keys.requires_grad_(False)
-        # self.model.text_prompt_values.requires_grad_(False)
-
-        pretext_loss = 0
-        pretext_count = 0
-
-        # for epoch in range(self.epochs):
-        #     for b, batch in enumerate(self.train_dataloader):
-        #         for key in batch:
-        #             batch[key] = batch[key].to(self.local_rank)
-                
-        #         y = self.model.pretext_forward(batch)
-                
-        #         adam_optimizer.zero_grad()
-        #         sgd_optimizer.zero_grad()
-        #         fc_optimizer.zero_grad()
-
-        #         y.backward()
-
-        #         adam_optimizer.step()
-        #         # sgd_optimizer.step()
-        #         fc_optimizer.step()
-
-        #         pretext_loss += y.item() * len(batch['label'])
-        #         pretext_count += len(batch['label'])
-
-        #         print("Epoch : {}, {}/{},  Loss : {:.6f},".format(epoch, b+1, len(self.train_dataloader), y.item()), end='\r')
-        #         gc.collect()
-        #     print(f"Epoch : {epoch}, Pretext loss : {pretext_loss / pretext_count}")
+        class_numbers = self.train_dataset.get_sample_in_class()
 
         for epoch in range(self.epochs):
             for b, batch in enumerate(self.train_dataloader):
                 # Move the batch to GPU if CUDA is available
+
+                # prob = class_numbers[batch['label']]
+                # first = torch.multinomial(torch.tensor(1/prob, dtype=torch.float), len(batch['label']), replacement=True)
+                # second = torch.multinomial(torch.tensor(1/prob, dtype=torch.float), len(batch['label']), replacement=True)
+
+                # first_audio = batch['audio'][first]
+                # first_text = batch['text'][first]
+
+                # second_audio = batch['audio'][second]
+                # second_text = batch['text'][second]
+
+                # first_label = batch['label'][first]
+                # first_label = F.one_hot(first_label, num_classes=self.num_class).float()
+                # second_label = batch['label'][second]
+                # second_label = F.one_hot(second_label, num_classes=self.num_class).float()
+
+                # first_ratio = torch.rand(len(first_audio))
+                # second_ratio = 1 - first_ratio
+
+                # batch['audio'] = first_audio * first_ratio.unsqueeze(-1) + second_audio * second_ratio.unsqueeze(-1)
+
+                # batch['text'] = torch.zeros_like(first_text)
+                # batch['text'].where(first_ratio > 0.5, first_text, second_text)
+
+                # batch['label'] = first_label * first_ratio.unsqueeze(-1) + second_label * second_ratio.unsqueeze(-1)
+
                 for key in batch:
                     batch[key] = batch[key].to(self.local_rank)
                 # batch['label'] = batch['label'] - 2
@@ -278,22 +255,29 @@ class Trainer:
                 y = self.model.forward(batch)
                 loss, logit = self.criteria(batch, y)
                 loss = loss.mean()
-            
+
+                if self.model == 'BPM_MT':
+                    loss += F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
+
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
+                # accuracy = (logit.argmax(dim=-1) == batch["label"].argmax(dim=-1)).float().mean()
 
                 # Zero the gradients
                 adam_optimizer.zero_grad()
                 sgd_optimizer.zero_grad()
-                fc_optimizer.zero_grad()
 
                 # Backpropagation
-                loss = loss #+ 0.5 * y['modalities']
+                loss = loss #+ y['audio_audio_similarity'] + y['text_text_similarity']
                 loss.backward()
+
+                # print(self.model.audio_prompt_keys.grad)
+                # print(self.model.audio_prompt_values_k.grad)
+                # print(self.model.before_audio_downproject[9].weight.grad)
+                # print(self.model.classifier.weight.grad)
 
                 # Update the model parameters
                 adam_optimizer.step()
                 sgd_optimizer.step()
-                fc_optimizer.step()
 
                 print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
                 # print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end=' ')

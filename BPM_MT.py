@@ -31,7 +31,7 @@ class CrossAttentionLayer(nn.Module):
 
         x = self.norm_2(x)
         x2 = self.ffn_1(self.dropout(x))
-        x2 = F.relu(x2)
+        x2 = F.gelu(x2)
         x2 = self.ffn_2(self.dropout(x2))
         x = x + x2
         
@@ -55,7 +55,7 @@ class SelfAttentionLayer(nn.Module):
 
         x = self.norm_2(x)
         x2 = self.ffn_1(self.dropout(x))
-        x2 = F.relu(x2)
+        x2 = F.gelu(x2)
         x2 = self.ffn_2(self.dropout(x2))
         x = x + x2
         return x
@@ -63,6 +63,79 @@ class SelfAttentionLayer(nn.Module):
 class BPM_MT(nn.Module):
     def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy"):
         super(BPM_MT, self).__init__()
+
+        self.mode = mode
+        self.register_module("language_model", language_model)
+        # if bert and vocab are not provided, raise an error
+        assert self.language_model is not None, "bert and vocab must be provided"
+
+        self.sentiment_dict = sentiment_dict
+        self.is_MT = self.sentiment_dict is not None
+
+        self.register_module("audio_model", audio_model)
+        # define the LSTM layer, 4 of layers
+        self.audio_feature_size = audio_model.get_feature_size()
+
+        self.dropout = nn.Dropout(dropout)
+        if self.mode == "audio_only" or self.mode == "text_only":
+            self.fc_layer_1 = nn.Linear(768, output_size)
+        elif self.mode == "flatten":
+            self.fc_layer_1 = nn.Linear(768 * 65, output_size)
+        else:
+            # self.fc_layer_1 = nn.Linear(794, output_size)
+            self.fc_layer_1 = nn.Linear(768 + self.audio_model.get_feature_size(), output_size)
+        self.relu = nn.ReLU()
+        if self.mode == "hierarchical":
+            self.classifier = nn.Linear(output_size, num_class - 1)
+            self.BC_classifier = nn.Linear(output_size, 2)
+        else:
+            self.classifier = nn.Linear(output_size, num_class)
+
+        self.BC_classifier = nn.Linear(output_size, 2)
+
+        self.sentiment_fc_layer_1 = nn.Linear(768, sentiment_output_size)
+        self.sentiment_relu = nn.ReLU()
+        self.sentiment_classifier = nn.Linear(sentiment_output_size, 5)
+
+    def forward(self, x):
+        y = {}
+
+        audio = x["audio"]
+        text  = x["text"]
+
+        # get audio only one channel
+        audio = audio[:, 0, :]
+
+        AB, AL = audio.shape
+        TB, TL = text.shape
+
+        original_audio = audio.clone()
+        original_text = text.clone()
+
+        audio = self.audio_model(audio)
+        _, text = self.language_model(text)
+
+        # print(text.shape)
+
+        audio = audio.mean(dim=1)
+        # text = text[:, 0, :]
+
+        # audio = self.audio_model(audio)[:, 0, :]
+        # text = self.language_model(text).last_hidden_state[:, 0, :]
+
+        concat = torch.cat((audio, text), dim=1)
+        x = self.fc_layer_1(self.dropout(concat))
+        x = self.relu(x)
+        y["logit"] = self.classifier(self.dropout(x))
+
+        if self.sentiment_dict != None:
+            y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_relu(self.sentiment_fc_layer_1(self.dropout(text)))))
+        
+        return y
+
+class Ours(nn.Module):
+    def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy"):
+        super(Ours, self).__init__()
 
         self.register_module("language_model", language_model)
         # if bert and vocab are not provided, raise an error
@@ -89,8 +162,9 @@ class BPM_MT(nn.Module):
         self.before_audio_downproject =  nn.Sequential(*[nn.Linear(768*4, 768) for _ in range(12)])
         self.before_text_downproject =  nn.Sequential(*[nn.Linear(768*4, 768) for _ in range(12)])
 
-        self.audio_to_text_attention = nn.Sequential(*[CrossAttentionLayer(768, 8, dropout=dropout) for _ in range(12)])
-        self.text_to_audio_attention = nn.Sequential(*[CrossAttentionLayer(768, 8, dropout=dropout) for _ in range(12)])
+        self.audio_to_text_attention = nn.Sequential(*[CrossAttentionLayer(768, 12, dropout=dropout) for _ in range(12)])
+        self.text_to_audio_attention = nn.Sequential(*[CrossAttentionLayer(768, 12, dropout=dropout) for _ in range(12)])
+        self.audio_text_self_attention = nn.Sequential(*[SelfAttentionLayer(768, 12, dropout=dropout) for _ in range(12)])
 
         self.after_audio_upproject =  nn.Sequential(*[nn.Linear(768, 768*4) for _ in range(12)])
         self.after_text_upproject =  nn.Sequential(*[nn.Linear(768, 768*4) for _ in range(12)])
@@ -98,14 +172,28 @@ class BPM_MT(nn.Module):
         self.after_audio_downproject =  nn.Sequential(*[nn.Linear(768*4, 768) for _ in range(12)])
         self.after_text_downproject =  nn.Sequential(*[nn.Linear(768*4, 768) for _ in range(12)])
 
-        self.num_prompt = 40
+        self.num_prompt = 20
         self.prompt_length = 5
+
+        self.audio_q_proj = nn.Linear(768, 768)
+        self.audio_k_proj = nn.Linear(768, 768)
+        self.audio_v_proj = nn.Linear(768, 768)
+
+        self.text_q_proj = nn.Linear(768, 768)
+        self.text_k_proj = nn.Linear(768, 768)
+        self.text_v_proj = nn.Linear(768, 768)
+
+        self.audio_output = nn.Linear(768, 768)
+        self.text_output = nn.Linear(768, 768)
 
         self.audio_prompt_keys = nn.Parameter(torch.randn(12, self.num_prompt, 768))
         self.text_prompt_keys = nn.Parameter(torch.randn(12, self.num_prompt, 768))
 
-        self.audio_prompt_values = nn.Parameter(torch.randn(12, self.num_prompt, self.prompt_length * 768))
-        self.text_prompt_values = nn.Parameter(torch.randn(12, self.num_prompt, self.prompt_length * 768))
+        self.audio_prompt_values_k = nn.Parameter(torch.randn(12, self.num_prompt, self.prompt_length * 768))
+        self.text_prompt_values_k = nn.Parameter(torch.randn(12, self.num_prompt, self.prompt_length * 768))
+
+        self.audio_prompt_values_v = nn.Parameter(torch.randn(12, self.num_prompt, self.prompt_length * 768))
+        self.text_prompt_values_v = nn.Parameter(torch.randn(12, self.num_prompt, self.prompt_length * 768))
 
         self.audio_mask = nn.Parameter(torch.randn(1, 1, 768))
         self.text_mask = nn.Parameter(torch.randn(1, 1, 768))
@@ -125,165 +213,23 @@ class BPM_MT(nn.Module):
         self.mode = mode
         self.dropout = nn.Dropout(dropout)
 
+        self.dropout = nn.Dropout(dropout)
         if self.mode == "audio_only" or self.mode == "text_only":
             self.fc_layer_1 = nn.Linear(768, output_size)
         elif self.mode == "flatten":
             self.fc_layer_1 = nn.Linear(768 * 65, output_size)
         else:
-            self.fc_layer_1 = nn.Linear(768, output_size)
+            # self.fc_layer_1 = nn.Linear(794, output_size)
+            self.fc_layer_1 = nn.Linear(768 + self.audio_model.get_feature_size(), output_size)
         self.relu = nn.ReLU()
         if self.mode == "hierarchical":
             self.classifier = nn.Linear(output_size, num_class - 1)
             self.BC_classifier = nn.Linear(output_size, 2)
         else:
             self.classifier = nn.Linear(output_size, num_class)
-
         self.BC_classifier = nn.Linear(output_size, 2)
 
-        self.sentiment_fc_layer_1 = nn.Linear(768, sentiment_output_size)
-        self.sentiment_relu = nn.ReLU()
-        self.sentiment_classifier = nn.Linear(sentiment_output_size, 5)
-
-    def audio_forward(self, x):
-        y = {}
-        audio = x["audio"]
-        audio = audio[:, 0, :]
-        AB, AL = audio.shape
-        audio = self.audio_model.model.feature_extractor(audio)
-        audio = self.audio_model.model.feature_projection(audio.transpose(1, 2))
-        audio = self.audio_model.model.encoder.pos_conv_embed(audio)
-        audio = self.audio_model.model.encoder.layer_norm(audio)
-        audio = self.audio_model.model.encoder.dropout(audio)
-        for i, audio_layer in enumerate(self.audio_model.model.encoder.layers):
-            audio_similarity = torch.cosine_similarity(audio.mean(dim=1).unsqueeze(1), self.audio_prompt_keys[i].unsqueeze(0), dim=-1) / (len(self.audio_prompt_keys[i]) ** (2))
-            audio_similarity = torch.softmax(audio_similarity, dim=-1)
-            audio_prompt = torch.matmul(audio_similarity, self.audio_prompt_values[i]).reshape(-1, self.prompt_length, 768)
-            audio = torch.cat((audio_prompt, audio), dim=1)
-            audio = audio_layer(audio)[0]
-            audio = audio[:, self.prompt_length:, :]
-            audio_prompt = audio[:, :self.prompt_length, :]
-        audio = audio_prompt
-        audio = audio.mean(dim=1)
-        x = self.fc_layer_1(self.dropout(audio))
-        x = self.relu(x)
-        y["logit"] = self.classifier(self.dropout(x))
-
-        return y
-    
-    def text_forward(self, x):
-        y = {}
-        text = x["text"]
-        TB, TL = text.shape
-        text = self.language_model.embeddings(text)
-        for i, text_layer in enumerate(self.language_model.encoder.layer):
-            text_similarity = torch.cosine_similarity(text.mean(dim=1).unsqueeze(1), self.text_prompt_keys[i].unsqueeze(0), dim=-1) / (len(self.audio_prompt_keys[i]) ** (2))
-            text_similarity = torch.softmax(text_similarity, dim=-1)
-            text_prompt = torch.matmul(text_similarity, self.text_prompt_values[i]).reshape(-1, self.prompt_length, 768)
-            text = torch.cat((text_prompt, text), dim=1)
-            text = text_layer(text)[0]
-            text = text[:, self.prompt_length:, :]
-            text_prompt = text[:, :self.prompt_length, :]
-        text = text_prompt
-        text = text.mean(dim=1)
-        x = self.fc_layer_1(self.dropout(text))
-        x = self.relu(x)
-        y["logit"] = self.classifier(self.dropout(x))
-
-        return y
-
-    def pretext_forward(self, x):
-
-        y = {}
-
-        audio = x["audio"]
-        text  = x["text"]
-
-        # get audio only one channel
-        audio = audio[:, 0, :]
-
-        AB, AL = audio.shape
-        TB, TL = text.shape
-
-        audio = audio.reshape(AB, 10, -1)
-        text = text.reshape(TB, 10, -1)
-
-        original_audio = audio.clone()
-        original_text = text.clone()
-
-        audio = audio.reshape(AB*10, -1)
-        text = text.reshape(TB*10, -1)
-
-        audio = self.audio_model.model.feature_extractor(audio)
-        audio = self.audio_model.model.feature_projection(audio.transpose(1, 2))
-        audio = self.audio_model.model.encoder.pos_conv_embed(audio)
-        audio = self.audio_model.model.encoder.layer_norm(audio)
-        audio = self.audio_model.model.encoder.dropout(audio)
-
-        text = self.language_model.embeddings(text)
-
-        audio_select = torch.rand(AB, 10).argsort(dim=-1)[:, :5]
-        text_select = torch.rand(TB, 10).argsort(dim=-1)[:,:5]
-
-        audio = audio.reshape(AB, 10, -1, 768)
-        text = text.reshape(TB, 10, -1, 768)
-
-        audio = audio[torch.arange(AB).unsqueeze(-1), audio_select]
-        text = text[torch.arange(TB).unsqueeze(-1), text_select]
-
-        audio = audio.reshape(AB, -1, 768)
-        text = text.reshape(TB, -1, 768)
-
-        for i, (audio_layer, text_layer) in enumerate(zip(self.audio_model.model.encoder.layers, self.language_model.encoder.layer)):
-            
-            audio = audio_layer(audio)[0]
-            text = text_layer(text)[0]
-
-            if i > 9:
-                _audio = self.before_audio_upproject[i](audio)
-                _text = self.before_text_upproject[i](text)
-
-                _audio = F.gelu(_audio)
-                _text = F.gelu(_text)
-
-                audio = self.before_audio_downproject[i](_audio) + audio
-                text = self.before_text_downproject[i](_text) + text
-
-                _audio = self.audio_to_text_attention[i](audio, text)
-                _text = self.text_to_audio_attention[i](text, audio)
-
-                audio = self.after_audio_upproject[i](_audio)
-                text = self.after_text_upproject[i](_text)
-
-                audio = F.gelu(audio)
-                text = F.gelu(text)
-
-                audio = self.after_audio_downproject[i](audio) + _audio
-                text = self.after_text_downproject[i](text) + _text
-            
-        audio = self.audio_mask.expand(AB, 70, -1).reshape(AB, 10, 7, -1).index_put((torch.arange(AB).unsqueeze(-1), audio_select), audio.reshape(AB, 5, 7, -1)).reshape(AB, 70, -1)
-        text = self.text_mask.expand(TB, 10, -1).reshape(TB, 10, 1, -1).index_put((torch.arange(TB).unsqueeze(-1), text_select), text.reshape(TB, 5, 1, -1)).reshape(TB, 10, -1)
-
-        audio = self.audio_downproject(audio)
-        text = self.text_downproject(text)
-
-        audio = audio + self.audio_decorder_pos
-        text = text + self.text_decorder_pos
-
-        audio = self.audio_decorder(audio)
-        text = self.text_decorder(text)
-
-        audio = audio.reshape(AB, 192*70)
-        text = text.reshape(TB, 10, 192)
-
-        audio = self.audio_predictor(audio)
-        text = self.text_predictor(text)
-
-        loss = F.mse_loss(audio, original_audio.flatten(1,2)) + F.cross_entropy(text.flatten(0,1), original_text.flatten())   
-
-        return loss
-
     def forward(self, x):
-
         y = {}
 
         audio = x["audio"]
@@ -298,12 +244,6 @@ class BPM_MT(nn.Module):
         original_audio = audio.clone()
         original_text = text.clone()
 
-        audio = audio.reshape(AB, 10, -1)
-        text = text.reshape(TB, 10)
-
-        audio = audio.reshape(AB*10, -1)
-        text = text.reshape(TB*10, -1)
-        
         audio = self.audio_model.model.feature_extractor(audio)
         audio = self.audio_model.model.feature_projection(audio.transpose(1, 2))
         audio = self.audio_model.model.encoder.pos_conv_embed(audio)
@@ -315,28 +255,144 @@ class BPM_MT(nn.Module):
         audio = audio.reshape(AB, -1, 768)
         text = text.reshape(TB, -1, 768)
 
+        _audio = audio.clone()
+        _text = text.clone()
+
+        for i, (audio_layer, text_layer) in enumerate(zip(self.audio_model.model.encoder.layers, self.language_model.encoder.layer)):
+            _audio = audio_layer(_audio)[0]
+            _text = text_layer(_text)[0]
+
+        # audio_q = self.audio_q_proj(_audio)
+        # audio_k = self.audio_k_proj(_audio)
+        # audio_v = self.audio_v_proj(_audio)
+
+        # text_q = self.text_q_proj(_text)
+        # text_k = self.text_k_proj(_text)
+        # text_v = self.text_v_proj(_text)
+
+        # audio_q = audio_q.reshape(AB, -1, 12, 64).transpose(1,2)
+        # audio_k = audio_k.reshape(AB, -1, 12, 64).transpose(1,2)
+        # audio_v = audio_v.reshape(AB, -1, 12, 64).transpose(1,2)
+
+        # text_q = text_q.reshape(TB, -1, 12, 64).transpose(1,2)
+        # text_k = text_k.reshape(TB, -1, 12, 64).transpose(1,2)
+        # text_v = text_v.reshape(TB, -1, 12, 64).transpose(1,2)
+
+        # audio_attention = torch.matmul(audio_q, audio_k.transpose(2,3)) / (768 ** (1/2))
+        # audio_attention = torch.softmax(audio_attention, dim=-1)
+        # _audio = torch.matmul(audio_attention, audio_v)
+        # _audio = _audio.transpose(1,2).reshape(AB, -1, 768)
+        # _audio = self.audio_output(_audio)
+
+        # text_attention = torch.matmul(text_q, text_k.transpose(2,3)) / (768 ** (1/2))
+        # text_attention = torch.softmax(text_attention, dim=-1)
+        # _text = torch.matmul(text_attention, text_v)
+        # _text = _text.transpose(1,2).reshape(TB, -1, 768)
+        # _text = self.text_output(_text)
+
+        # _audio = _audio + audio
+        # _text = _text + text
+
+        audio_mean = _audio.mean(dim=1)
+        text_mean = _text[:, 0, :]
+        
+        audio_audio_similarity = torch.cosine_similarity(audio_mean.unsqueeze(1), self.audio_prompt_keys[0].unsqueeze(0), dim=-1)# / (len(self.audio_prompt_keys[0]) ** (2))
+        text_text_similarity = torch.cosine_similarity(text_mean.unsqueeze(1), self.text_prompt_keys[0].unsqueeze(0), dim=-1)# / (len(self.audio_prompt_keys[0]) ** (2))
+        # audio_audio_similarity = F.softmax(audio_audio_similarity, dim=-1)
+        # text_text_similarity = F.softmax(text_text_similarity, dim=-1)
+        audio_text_similarity = torch.cosine_similarity(audio_mean.unsqueeze(1), self.text_prompt_keys[0].unsqueeze(0), dim=-1)# / (len(self.audio_prompt_keys[0]) ** (2))
+        text_audio_similarity = torch.cosine_similarity(text_mean.unsqueeze(1), self.audio_prompt_keys[0].unsqueeze(0), dim=-1)# / (len(self.audio_prompt_keys[0]) ** (2))
+        # audio_text_similarity = F.softmax(audio_text_similarity, dim=-1)
+        # text_audio_similarity = F.softmax(text_audio_similarity, dim=-1)
+
+        # print(audio_audio_similarity.shape)
+
+        # audio_audio_prompt_k = [self.audio_prompt_values_k[i, audio_audio_similarity.argmax(dim=1)].reshape(-1, self.prompt_length, 768) for i in range(12)]
+        # audio_audio_prompt_v = [self.audio_prompt_values_v[i, audio_audio_similarity.argmax(dim=1)].reshape(-1, self.prompt_length, 768) for i in range(12)]
+        # text_text_prompt_k = [self.text_prompt_values_k[i, text_text_similarity.argmax(dim=1)].reshape(-1, self.prompt_length, 768) for i in range(12)]
+        # text_text_prompt_v = [self.text_prompt_values_v[i, text_text_similarity.argmax(dim=1)].reshape(-1, self.prompt_length, 768) for i in range(12)]
+
+        # y["audio_audio_similarity"] = (1 - audio_audio_similarity.max(dim=-1)[0]).sum(dim=-1)
+        # y["text_text_similarity"] = (1 - text_text_similarity.max(dim=-1)[0]).sum(dim=-1)
+
+        audio_audio_prompt_k = [torch.matmul(audio_audio_similarity, self.audio_prompt_values_k[i]).reshape(-1, self.prompt_length, 768) for i in range(12)]
+        audio_audio_prompt_v = [torch.matmul(audio_audio_similarity, self.audio_prompt_values_v[i]).reshape(-1, self.prompt_length, 768) for i in range(12)]
+        text_text_prompt_k = [torch.matmul(text_text_similarity, self.text_prompt_values_k[i]).reshape(-1, self.prompt_length, 768) for i in range(12)]
+        text_text_prompt_v = [torch.matmul(text_text_similarity, self.text_prompt_values_v[i]).reshape(-1, self.prompt_length, 768) for i in range(12)]
+
+        audio_text_prompt_k = [torch.matmul(audio_text_similarity, self.text_prompt_values_k[i]).reshape(-1, self.prompt_length, 768) for i in range(12)]
+        audio_text_prompt_v = [torch.matmul(audio_text_similarity, self.text_prompt_values_v[i]).reshape(-1, self.prompt_length, 768) for i in range(12)]
+        text_audio_prompt_k = [torch.matmul(text_audio_similarity, self.audio_prompt_values_k[i]).reshape(-1, self.prompt_length, 768) for i in range(12)]
+        text_audio_prompt_v = [torch.matmul(text_audio_similarity, self.audio_prompt_values_v[i]).reshape(-1, self.prompt_length, 768) for i in range(12)]
+        
         for i, (audio_layer, text_layer) in enumerate(zip(self.audio_model.model.encoder.layers, self.language_model.encoder.layer)):
             
-            # _audio = audio_layer(audio)[0]
-            # _text = text_layer(text)[0]
+            if i < -1:
+                audio_query = audio_layer.attention.q_proj(audio)
+                # audio_key = audio_layer.attention.k_proj(torch.cat((audio_audio_prompt_k[i], audio), dim=1))
+                # audio_value = audio_layer.attention.v_proj(torch.cat((audio_audio_prompt_v[i], audio), dim=1))
+                audio_key = audio_layer.attention.k_proj(torch.cat((audio_audio_prompt_k[i], text_audio_prompt_k[i], audio), dim=1))
+                audio_value = audio_layer.attention.v_proj(torch.cat((audio_audio_prompt_v[i], text_audio_prompt_v[i], audio), dim=1))
 
-            # audio_mean = _audio.mean(dim=1)
-            # text_mean = _text.mean(dim=1)
+                audio_query = audio_layer.dropout(audio_query).reshape(AB, -1, 12, 64).transpose(1,2)
+                audio_key = audio_layer.dropout(audio_key).reshape(AB, -1, 12, 64).transpose(1,2)
+                audio_value = audio_layer.dropout(audio_value).reshape(AB, -1, 12, 64).transpose(1,2)
 
-            # audio_similarity = torch.cosine_similarity(audio_mean.unsqueeze(1), self.audio_prompt_keys[i].unsqueeze(0), dim=-1) / (len(self.audio_prompt_keys[i]) ** (2))
-            # text_similarity = torch.cosine_similarity(text_mean.unsqueeze(1), self.text_prompt_keys[i].unsqueeze(0), dim=-1) / (len(self.audio_prompt_keys[i]) ** (2))
-            # audio_similarity = torch.softmax(audio_similarity, dim=-1)
-            # text_similarity = torch.softmax(text_similarity, dim=-1)
-            # audio_prompt = torch.matmul(audio_similarity, self.audio_prompt_values[i]).reshape(-1, self.prompt_length, 768)
-            # text_prompt = torch.matmul(text_similarity, self.text_prompt_values[i]).reshape(-1, self.prompt_length, 768)
+                audio_attention = torch.matmul(audio_query, audio_key.transpose(2,3)) / (768 ** (1/2))
+                audio_attention = torch.softmax(audio_attention, dim=-1)
+                _audio = torch.matmul(audio_attention, audio_value)
+                _audio = _audio.transpose(1,2).reshape(AB, -1, 768)
 
-            # audio = torch.cat((audio_prompt, audio), dim=1)
-            # text = torch.cat((text_prompt, text), dim=1)
+                _audio = audio_layer.attention.out_proj(_audio)
+                _audio = audio_layer.dropout(_audio)
+                _audio = audio_layer.layer_norm(_audio)
 
-            audio = audio_layer(audio)[0]
-            text = text_layer(text)[0]
+                audio = audio + _audio
 
-            if i > 9:
+                _audio = audio_layer.feed_forward(audio)
+                _audio = audio_layer.final_layer_norm(_audio)
+
+                audio = audio + _audio
+
+                text_query = text_layer.attention.self.query(text)
+                text_key = text_layer.attention.self.key(torch.cat((text_text_prompt_k[i], text), dim=1))
+                text_value = text_layer.attention.self.value(torch.cat((text_text_prompt_v[i], text), dim=1))
+                # text_key = text_layer.attention.self.key(torch.cat((text_text_prompt_k[i], audio_text_prompt_k[i], text), dim=1))
+                # text_value = text_layer.attention.self.value(torch.cat((text_text_prompt_v[i], audio_text_prompt_k[i], text), dim=1))
+
+                text_query = text_layer.attention.self.dropout(text_query).reshape(TB, -1, 12, 64).transpose(1,2)
+                text_key = text_layer.attention.self.dropout(text_key).reshape(TB, -1, 12, 64).transpose(1,2)
+                text_value = text_layer.attention.self.dropout(text_value).reshape(TB, -1, 12, 64).transpose(1,2)
+
+                text_attention = torch.matmul(text_query, text_key.transpose(2,3)) / (768 ** (1/2))
+                text_attention = torch.softmax(text_attention, dim=-1)
+                _text = torch.matmul(text_attention, text_value)
+                _text = _text.transpose(1,2).reshape(TB, -1, 768)
+
+                _text = text_layer.attention.output.dense(_text)
+                _text = text_layer.attention.output.LayerNorm(_text)
+                _text = text_layer.attention.output.dropout(_text)
+
+                text = text + _text
+
+                _text = text_layer.intermediate(text)
+                _text = text_layer.output.dense(_text)
+                _text = text_layer.output.dropout(_text)
+                _text = text_layer.output.LayerNorm(_text)
+
+                text = text + _text
+
+                audio = audio_layer(audio)[0]
+                text = text_layer(text)[0]
+            
+            elif i < 9:
+                audio = audio_layer(audio)[0]
+                text = text_layer(text)[0]
+
+            else:
+                audio = audio_layer(audio)[0]
+                text = text_layer(text)[0]
+
                 _audio = self.before_audio_upproject[i](audio)
                 _text = self.before_text_upproject[i](text)
 
@@ -349,6 +405,13 @@ class BPM_MT(nn.Module):
                 _audio = self.audio_to_text_attention[i](audio, text)
                 _text = self.text_to_audio_attention[i](text, audio)
 
+                # AB, AL, _ = audio.shape
+                # TB, TL, _ = text.shape
+                # concat = torch.cat((audio, text), dim=1)
+                # concat = self.audio_text_self_attention[i](concat)
+                # _audio = concat[:, :AL, :]
+                # _text = concat[:, AL:, :]
+
                 audio = self.after_audio_upproject[i](_audio)
                 text = self.after_text_upproject[i](_text)
 
@@ -357,12 +420,11 @@ class BPM_MT(nn.Module):
 
                 audio = self.after_audio_downproject[i](audio) + _audio
                 text = self.after_text_downproject[i](text) + _text
-            
-        #     audio_prompt = audio[:, :self.prompt_length, :]
-        #     text_prompt = text[:, :self.prompt_length, :]
+            # audio_prompt = audio[:, :self.prompt_length, :]
+            # text_prompt = text[:, :self.prompt_length, :]
 
-        #     audio = audio[:, self.prompt_length:, :]
-        #     text = text[:, self.prompt_length:, :]
+            # audio = audio[:, self.prompt_length:, :]
+            # text = text[:, self.prompt_length:, :] 
 
         # audio = audio_prompt
         # text = text_prompt
@@ -375,10 +437,21 @@ class BPM_MT(nn.Module):
         #                                         dim=1).flatten(0,1))
         # y["modalities"] = modalities
 
-        concat = torch.cat((audio, text), dim=1)
-        concat = concat.mean(dim=1)
-        x = self.fc_layer_1(self.dropout(concat))
-        x = self.relu(x)
-        y["logit"] = self.classifier(self.dropout(x))
+        audio = audio.mean(dim=1)
+        text = text[:, 0, :]
+
+        # audio = self.audio_model(audio)[:, 0, :]
+        # text = self.language_model(text).last_hidden_state[:, 0, :]
+
+        if self.mode == "audio_only" or self.mode == "text_only":
+            concat = audio if self.mode == "audio_only" else text
+        else :
+            concat = torch.cat((audio, text), dim=1)
+        y["logit"] = self.fc_layer_1(self.dropout(concat))
+        y["logit"] = self.relu(y["logit"])
+        y["logit"] = self.classifier(self.dropout(y["logit"]))
+
+        # y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_relu(self.sentiment_fc_layer_1(self.dropout(text)))))
         
         return y
+    

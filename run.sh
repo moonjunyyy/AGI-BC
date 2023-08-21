@@ -28,7 +28,8 @@ conda activate BC
 conda --version
 python --version
 
-mode=${1}
+model=${1}
+mode=${2}
 
 seeds=(1 21 42 3473 10741 32450 93462 85015 64648 71950 87557 99668 55552 4811 10741)
 
@@ -39,11 +40,12 @@ export CUDA_LAUNCH_BLOCKING=1
 for i in seeds
 do
     python main.py \
+    --model ${model} \
     --mode ${mode} \
     --seed ${seeds[$i]} \
-    --batch_size 64 \
+    --batch_size 32 \
     --num_workers 8 \
-    --epochs 20 \
+    --epochs 11 \
     --language koBert \
     --audio HuBert \
     --lr 0.0005 \

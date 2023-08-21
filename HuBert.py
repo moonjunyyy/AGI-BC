@@ -2,11 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoProcessor, AutoModel
+from transformers import Wav2Vec2FeatureExtractor
 
 class HuBert(nn.Module):
     def __init__(self, sample_rate) -> None:
         super().__init__()
-        self.processor = AutoProcessor.from_pretrained("facebook/hubert-base-ls960")
+        # self.processor = AutoProcessor.from_pretrained("facebook/hubert-base-ls960")
+        self.processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960") 
         self.model = AutoModel.from_pretrained("facebook/hubert-base-ls960")
         self.sample_rate = sample_rate
 
