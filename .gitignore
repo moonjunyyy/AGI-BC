@@ -6,3 +6,4 @@ __pycache__/*
 test.py
 ETRI_preprocess.py
 *.pt
+*.png
