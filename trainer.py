@@ -223,30 +223,32 @@ class Trainer:
             for b, batch in enumerate(self.train_dataloader):
                 # Move the batch to GPU if CUDA is available
 
-                # prob = class_numbers[batch['label']]
-                # first = torch.multinomial(torch.tensor(1/prob, dtype=torch.float), len(batch['label']), replacement=True)
-                # second = torch.multinomial(torch.tensor(1/prob, dtype=torch.float), len(batch['label']), replacement=True)
+                prob = class_numbers[batch['label']]
+                first = torch.multinomial(torch.tensor(1/prob, dtype=torch.float), len(batch['label']), replacement=True)
+                second = torch.multinomial(torch.tensor(1/prob, dtype=torch.float), len(batch['label']), replacement=True)
 
-                # first_audio = batch['audio'][first]
-                # first_text = batch['text'][first]
+                first_audio = batch['audio'][first]
+                first_text = batch['text'][first]
 
-                # second_audio = batch['audio'][second]
-                # second_text = batch['text'][second]
+                second_audio = batch['audio'][second]
+                second_text = batch['text'][second]
 
-                # first_label = batch['label'][first]
-                # first_label = F.one_hot(first_label, num_classes=self.num_class).float()
-                # second_label = batch['label'][second]
-                # second_label = F.one_hot(second_label, num_classes=self.num_class).float()
+                print (first_audio.shape, second_audio.shape, first_text.shape, second_text.shape)
 
-                # first_ratio = torch.rand(len(first_audio))
-                # second_ratio = 1 - first_ratio
+                first_label = batch['label'][first]
+                first_label = F.one_hot(first_label, num_classes=self.num_class).float()
+                second_label = batch['label'][second]
+                second_label = F.one_hot(second_label, num_classes=self.num_class).float()
 
-                # batch['audio'] = first_audio * first_ratio.unsqueeze(-1) + second_audio * second_ratio.unsqueeze(-1)
+                first_ratio = torch.rand(len(first_audio))
+                second_ratio = 1 - first_ratio
 
-                # batch['text'] = torch.zeros_like(first_text)
-                # batch['text'].where(first_ratio > 0.5, first_text, second_text)
+                batch['audio'] = first_audio * first_ratio.unsqueeze(-1) + second_audio * second_ratio.unsqueeze(-1)
 
-                # batch['label'] = first_label * first_ratio.unsqueeze(-1) + second_label * second_ratio.unsqueeze(-1)
+                batch['text'] = first_text
+                batch['text'].where(first_ratio.unsqueeze(1) > 0.5, second_text)
+
+                batch['label'] = first_label * first_ratio.unsqueeze(-1) + second_label * second_ratio.unsqueeze(-1)
 
                 for key in batch:
                     batch[key] = batch[key].to(self.local_rank)

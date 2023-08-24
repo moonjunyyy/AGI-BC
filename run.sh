@@ -45,7 +45,7 @@ do
     --seed ${seeds[$i]} \
     --batch_size 32 \
     --num_workers 8 \
-    --epochs 11 \
+    --epochs 30 \
     --language koBert \
     --audio HuBert \
     --lr 0.0005 \

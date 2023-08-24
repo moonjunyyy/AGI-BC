@@ -355,10 +355,10 @@ class Ours(nn.Module):
                 audio = audio + _audio
 
                 text_query = text_layer.attention.self.query(text)
-                text_key = text_layer.attention.self.key(torch.cat((text_text_prompt_k[i], text), dim=1))
-                text_value = text_layer.attention.self.value(torch.cat((text_text_prompt_v[i], text), dim=1))
-                # text_key = text_layer.attention.self.key(torch.cat((text_text_prompt_k[i], audio_text_prompt_k[i], text), dim=1))
-                # text_value = text_layer.attention.self.value(torch.cat((text_text_prompt_v[i], audio_text_prompt_k[i], text), dim=1))
+                # text_key = text_layer.attention.self.key(torch.cat((text_text_prompt_k[i], text), dim=1))
+                # text_value = text_layer.attention.self.value(torch.cat((text_text_prompt_v[i], text), dim=1))
+                text_key = text_layer.attention.self.key(torch.cat((text_text_prompt_k[i], audio_text_prompt_k[i], text), dim=1))
+                text_value = text_layer.attention.self.value(torch.cat((text_text_prompt_v[i], audio_text_prompt_k[i], text), dim=1))
 
                 text_query = text_layer.attention.self.dropout(text_query).reshape(TB, -1, 12, 64).transpose(1,2)
                 text_key = text_layer.attention.self.dropout(text_key).reshape(TB, -1, 12, 64).transpose(1,2)
@@ -402,15 +402,15 @@ class Ours(nn.Module):
                 audio = self.before_audio_downproject[i](_audio) + audio
                 text = self.before_text_downproject[i](_text) + text
 
-                _audio = self.audio_to_text_attention[i](audio, text)
-                _text = self.text_to_audio_attention[i](text, audio)
+                # _audio = self.audio_to_text_attention[i](audio, text)
+                # _text = self.text_to_audio_attention[i](text, audio)
 
-                # AB, AL, _ = audio.shape
-                # TB, TL, _ = text.shape
-                # concat = torch.cat((audio, text), dim=1)
-                # concat = self.audio_text_self_attention[i](concat)
-                # _audio = concat[:, :AL, :]
-                # _text = concat[:, AL:, :]
+                AB, AL, _ = audio.shape
+                TB, TL, _ = text.shape
+                concat = torch.cat((audio, text), dim=1)
+                concat = self.audio_text_self_attention[i](concat)
+                _audio = concat[:, :AL, :]
+                _text = concat[:, AL:, :]
 
                 audio = self.after_audio_upproject[i](_audio)
                 text = self.after_text_upproject[i](_text)
