@@ -30,6 +30,7 @@ python --version
 
 model=${1}
 mode=${2}
+dataset=${3}
 
 seeds=(1 21 42 3473 10741 32450 93462 85015 64648 71950 87557 99668 55552 4811 10741)
 
@@ -42,14 +43,15 @@ do
     python main.py \
     --model ${model} \
     --mode ${mode} \
+    --dataset ${dataset} \
     --seed ${seeds[$i]} \
     --batch_size 32 \
     --num_workers 8 \
     --epochs 30 \
     --language koBert \
-    --audio HuBert \
+    --audio LSTM \
     --lr 0.0005 \
     --dropout 0.3 \
     --world_size $WORLD_SIZE \
-    --rank $SLURM_PROCID
+    --rank $SLURM_PROCID ${4}
 done

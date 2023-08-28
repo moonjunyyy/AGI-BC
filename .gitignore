@@ -1,5 +1,4 @@
 .cache/*
-data/*
 __pycache__/*
 *.out
 *.err
@@ -7,3 +6,4 @@ test.py
 ETRI_preprocess.py
 *.pt
 *.png
+*.pyc
