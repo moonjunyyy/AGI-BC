@@ -1,12 +1,14 @@
 import os
 import gc
+import sys
 import time
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import random
+import torchaudio
 import torch.backends.cudnn as cudnn
 import numpy as np
 import torch
@@ -14,6 +16,7 @@ import torch.nn.functional as F
 from util.utils import get_dataset, get_audio_model,\
      get_language_model, get_backchannel_prediction_model
 from util.criterions import get_criterion
+from util.koalpaca import KoAlpaca
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -99,7 +102,7 @@ class Trainer:
             num_class=self.num_class,
             sentiment_output_size=64,
             dropout=0.3,
-            mode=self.mode)
+            mode=self.mode, tokenizer = tokenizer)
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
         if self.distributed:
@@ -108,30 +111,77 @@ class Trainer:
         # Get the model parameters divided into two groups : bert and others
         bert_params = []
         other_params = []
+        discriminator_params = []
         prompt_params = []
 
-        for name, param in self.model.named_parameters():
-            if 'language_model' in name or 'audio_model' in name:
-                bert_params.append(param)
-            elif 'prompt' in name:
-                prompt_params.append(param)
-            else:
-                other_params.append(param)
+        # for name, param in self.model.named_parameters():
+        #     if 'language_model' in name or 'audio_model' in name:
+        #         bert_params.append(param)
+        #     elif 'prompt' in name:
+        #         prompt_params.append(param)
+        #     else:
+        #         other_params.append(param)
 
-        adam_optimizer = torch.optim.Adam(other_params, lr=0.0005, weight_decay=self.weight_decay)
-        sgd_optimizer = torch.optim.SGD(bert_params, lr=0.0005)
-        if prompt_params != []:
-            adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0005, 'weight_decay': self.weight_decay})
+        # adam_optimizer = torch.optim.Adam(other_params, lr=1e-4, weight_decay=self.weight_decay)
+        # sgd_optimizer = torch.optim.SGD(bert_params, lr=1e-4)
+        # if prompt_params != []:
+        #     adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0001, 'weight_decay': self.weight_decay})
+
+        cross_attention_params = []
+        lora_params = []
+        for name, param in self.model.named_parameters():
+            if 'audio_to_text_attention' in name or 'text_to_audio_attention' in name:
+                cross_attention_params.append(param)
+            elif 'lora' in name:
+                lora_params.append(param)
+        # optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
+        ca_optimizer = torch.optim.Adam(cross_attention_params, lr=1e-5, weight_decay=self.weight_decay)
+        lora_optimizer = torch.optim.Adam(lora_params, lr=1e-5, weight_decay=self.weight_decay)
+
+        try:
+            state_dict = torch.load(f'pretrained_{self.mode}.pt')
+            self.model_without_ddp.load_state_dict(state_dict)
+            print('Load pretrained model')
+        except Exception as e:
+            print(e)
+            print('No pretrained model')
+            if hasattr(self.model_without_ddp, 'pretext_forward'):
+                # koalpaca = KoAlpaca()
+                for epoch in range(self.epochs * 10):
+                    self.train_sampler.set_epoch(epoch)
+                    pre_loss = 0
+                    pre_count = 0
+                    for b, batch in enumerate(self.train_dataloader):
+                        pre_count += 1
+                        for key in batch:
+                            batch[key] = batch[key].to(self.local_rank)
+                        # print(f"Epoch : {epoch}, {b+1}/{len(self.train_dataloader)}", end=' ')
+                        loss = self.model_without_ddp.pretext_forward(batch)
+                        loss = loss.mean()
+                        pre_loss += loss.item()
+                        # Zero the gradients
+                        ca_optimizer.zero_grad()
+                        lora_optimizer.zero_grad()
+                        # Backpropagation
+                        loss.backward()
+                        # Update the model parameters
+                        ca_optimizer.step()
+                        lora_optimizer.step()
+                        # if self.verbose:
+                            # print("Epoch : {}, {}/{},  Loss : {:.6f}".format(epoch, b+1, len(self.train_dataloader), loss.item()), end='\r')
+                            # ta, fa, tt, ft = self.model_without_ddp.get_generation_result(batch, tokenizer)
+                    print(f'Epoch : {epoch}, Loss : {pre_loss/pre_count:.6f}', " "*20)
+                torch.save(self.model_without_ddp.state_dict(), f'pretrained_{self.mode}.pt')
+            else:
+                print('No pretext training')
 
         for epoch in range(self.epochs):
+            self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.epochs * 10)
             for b, batch in enumerate(self.train_dataloader):
                 
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
                     batch[key] = batch[key].to(self.local_rank)
-
-                print(batch['text'])
-                exit()
 
                 y = self.model.forward(batch)
                 loss, logit = self.criteria(batch, y)
@@ -143,15 +193,11 @@ class Trainer:
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
                 # Zero the gradients
-                adam_optimizer.zero_grad()
-                sgd_optimizer.zero_grad()
-
+                optimizer.zero_grad()
                 # Backpropagation
                 loss.backward()
-
                 # Update the model parameters
-                adam_optimizer.step()
-                sgd_optimizer.step()
+                optimizer.step()
 
                 if self.verbose:
                     print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
@@ -223,9 +269,10 @@ class Trainer:
                 recall    = tp / (tp + fn + 1e-6)
                 f1_score  = 2 * precision * recall / (precision + recall + 1e-6)
                 f1_score = f1_score.nan_to_num(0).detach().cpu()
-                number_of_classes = self.train_dataset.get_sample_in_class()
+                number_of_classes = self.val_dataset.get_sample_in_class()
                 weighted_f1_score = (f1_score * number_of_classes).sum() / number_of_classes.sum()
                 print(f"Epoch : {epoch}, Loss : {loss.item():.6f}, Acc : {accuracy.item()*100:.3f}, F1 : {weighted_f1_score.item()*100:.3f}, {f1_score.tolist()}")
+                sys.stdout.flush()
             gc.collect()
         
     def init_distributed(self):

@@ -1,7 +1,9 @@
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from itertools import permutations
+from util.utils import get_audio_model, get_language_model
 from layer.cross_attention_layer import CrossAttentionLayer
 from layer.self_attention_layer import SelfAttentionLayer
 
@@ -23,27 +25,26 @@ class Ours(nn.Module):
         self.register_module("audio_model", audio_model)
         # define the LSTM layer, 4 of layers
         self.audio_feature_size = audio_model.get_feature_size()
-
-        self.encoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=768, nhead=12, batch_first=True) for _ in range(4)])
-        
-        self.audio_decoder = nn.Sequential(*[CrossAttentionLayer(d_model=192, nhead=2) for _ in range(2)])
-        self.text_decoder = nn.Sequential(*[CrossAttentionLayer(d_model=192, nhead=2) for _ in range(2)])
         
         self.full_downproject = nn.Linear(768, 192)
         self.audio_downproject = nn.Linear(768, 192)   
         self.text_downproject = nn.Linear(768, 192)
 
-        # self.encoder = nn.Sequential(*[SelfAttentionLayer(768, 8, dropout=dropout) for _ in range(3)])
-
         self.downproject = nn.Linear(768, 192)
+
+        self.len_audio_prdict = 0.5
+        self.len_text_prdict = 3
 
         self.num_prompt = 20
         self.prompt_length = 5
 
-        self.encoder = nn.Sequential(*[nn.TransformerEncoderLayer(d_model=768, nhead=12, batch_first=True) for _ in range(4)])
+        self.encoder = nn.Sequential(*[SelfAttentionLayer(768, 12, dropout=dropout) for _ in range(8)])
 
-        self.audio_decoder = nn.Sequential(*[CrossAttentionLayer(d_model=192, nhead=2) for _ in range(2)])
-        self.text_decoder = nn.Sequential(*[CrossAttentionLayer(d_model=192, nhead=2) for _ in range(2)])
+        self.audio_decoder = nn.Sequential(*[CrossAttentionLayer(d_model=192, nhead=4) for _ in range(4)])
+        self.text_decoder = nn.Sequential(*[CrossAttentionLayer(d_model=192, nhead=4) for _ in range(4)])
+
+        self.audio_predictor = nn.Linear(192*99, 32000)
+        self.text_predictor = nn.Linear(192, 8002)   
 
         self.mode = mode
         self.dropout = nn.Dropout(dropout)
@@ -64,27 +65,92 @@ class Ours(nn.Module):
             self.classifier = nn.Linear(output_size, num_class)
         self.BC_classifier = nn.Linear(output_size, 2)
 
+        self.text_discriminator = get_language_model('Bert')
+        self.audio_discriminator = get_audio_model('HuBert')
+        self.text_discriminator_head = nn.Linear(768, 1)
+        self.audio_discriminator_head = nn.Linear(768, 1)
+
     def pretext_forward(self, x):
-        audio = x["audio"][:,0,:]
-        text  = x["text"]
+        input_audio = x["audio"][:,0,:]
+        input_text  = x["text"]
 
-        B, L = audio.shape
+        B, L = input_audio.shape
 
-        original_text = text.clone()
-        original_audio = audio.clone()
+        # append_audio = F.pad(input_audio, (0, L//3), "constant", 0)
+        # append_text = {text_key: input_text[text_key].clone() for text_key in input_text}
 
-        generation_target_audio = x["target_audio"][:,0,:]
-        generation_target_text = x["target_text"]
+        sep_token_pos = (input_text['input_ids'] == 3).nonzero()
+        appen_sep_token_pos = sep_token_pos + torch.cat((torch.zeros(B, 1), torch.ones(B, 1) * self.len_text_prdict), dim=1).to(sep_token_pos.device).long()
+        appen_sep_token_pos[appen_sep_token_pos[:,1] > 19, 1] = 19
 
-        audio = F.pad(audio, (0, L//3), "constant", 0)
-        input_ids = []
-        attention_mask = []
-        for idx, att in zip(text['input_ids'], text['attention_mask']):
-            sep = (idx==3).nonzero()
-            idx[sep:sep+5]=0; idx[sep+5]=3
-            att[sep:sep+5]=0; att[sep+5]=1
-            
+        mask_token_pos = sep_token_pos.repeat(1, self.len_text_prdict).reshape(-1, 2)
+        mask_token_pos = mask_token_pos + torch.cat((torch.zeros(B * self.len_text_prdict, 1), torch.arange(self.len_text_prdict).unsqueeze(1).repeat(B, 1)), dim=1).to(mask_token_pos.device).long()
+        mask_token_pos = mask_token_pos[mask_token_pos[:,1] < 19]
 
+        # append_text['input_ids'][appen_sep_token_pos[:,0], appen_sep_token_pos[:,1]] = 3
+        # append_text['attention_mask'][appen_sep_token_pos[:,0], appen_sep_token_pos[:,1]] = 1
+        # append_text['input_ids'][mask_token_pos[:,0], mask_token_pos[:,1]] = 4
+        # append_text['attention_mask'][mask_token_pos[:,0], mask_token_pos[:,1]] = 1
+
+        target_audio = x['target_audio'][:,0,:]
+        target_text = x['target_text']['input_ids']
+        target_text[target_text==3] = 1
+
+        target_token_pos = mask_token_pos[:,1] - sep_token_pos[mask_token_pos[:,0], 1] + 1
+        target_text = target_text[mask_token_pos[:,0], target_token_pos]
+
+        full_text = {text_key: input_text[text_key] for text_key in input_text}
+        full_text['input_ids'][appen_sep_token_pos[:,0], appen_sep_token_pos[:,1]] = 3
+        full_text['attention_mask'][appen_sep_token_pos[:,0], appen_sep_token_pos[:,1]] = 1
+        full_text['input_ids'] = full_text['input_ids'].flatten(0,1)
+        full_text['input_ids'] = full_text['input_ids'].scatter(0, mask_token_pos[:,0] * 20 + mask_token_pos[:,1], target_text).reshape(B, -1)
+        full_text['attention_mask'][mask_token_pos[:,0], mask_token_pos[:,1]] = 1
+        full_audio = torch.cat((input_audio, target_audio), dim=1)
+
+        audio_mask = torch.rand(B, L + self.len_text_prdict, device=full_audio.device).argsort(dim=1)
+        audio_visible = audio_mask[:, int(L * 0.15)+1:]
+        aduio_mask = audio_mask[:, :int(L * 0.15)]
+
+        text_mask = torch.rand(B, 20, device=full_text['input_ids'].device).argsort(dim=1)
+        text_visible = torch.cat((text_mask[:,:1], text_mask[:, int(20 * 0.15)+1:]), dim=1)
+        text_mask = text_mask[:, 1:int(20 * 0.15)+1]
+
+        masked_audio = full_audio.clone()
+        masked_audio[:, audio_mask] = 0
+
+        masked_text = {text_key: full_text[text_key].clone() for text_key in full_text}
+        masked_text['input_ids'][:, text_mask] = 4
+
+        embed_audio = self.audio_model(masked_audio)
+        embed_text, _ = self.language_model(**masked_text)
+
+        embed_audio = embed_audio.reshape(B, -1, 768)
+        embed_text = embed_text.reshape(B, -1, 768)
+
+        AB, AL, _ = embed_audio.shape
+        TB, TL, _ = embed_text.shape
+
+        concat = torch.cat((embed_audio, embed_text), dim=1)
+        concat = self.encoder(concat)
+
+        embed_audio = concat[:, :AL, :]
+        embed_text = concat[:, AL:, :]
+
+        embed_audio = self.audio_downproject(embed_audio)
+        embed_text = self.text_downproject(embed_text)
+
+        for a_dec, t_dec in zip(self.audio_decoder, self.text_decoder):
+            embed_audio = a_dec(embed_audio, embed_text)
+            embed_text = t_dec(embed_text, embed_audio)
+
+        embed_audio = embed_audio.reshape(B, -1)
+        embed_audio = self.audio_predictor(embed_audio)
+        embed_text = embed_text[mask_token_pos[:,0], mask_token_pos[:,1]]
+        full_text = full_text['input_ids'][mask_token_pos[:,0], mask_token_pos[:,1]]
+        embed_text = self.text_predictor(embed_text)
+
+        return embed_audio, embed_text, full_audio, full_text
+    
     def forward(self, x):
         y = {}
 
@@ -310,23 +376,3 @@ class Ours(nn.Module):
         # y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_relu(self.sentiment_fc_layer_1(self.dropout(text)))))
         
         return y
-    
-    class Ours(nn.Module):
-        def __init__(self, language_model=None, audio_model=None, output_size=128, num_class=4, dropout=0.3, mode="cross_entropy") -> None:
-            super().__init__()
-
-            if self.mode != 'audio_only':
-                self.register_module("language_model", language_model)
-                # if bert and vocab are not provided, raise an error
-                assert self.language_model is not None, "bert must be provided"
-            if self.mode != 'text_only':
-                self.register_module("audio_model", audio_model)
-                # define the LSTM layer, 4 of layers
-                self.audio_feature_size = audio_model.get_feature_size()
-                assert self.audio_model is not None, "audio_model must be provided"
-            
-
-            pass
-
-        def forward(self, x):
-            pass

@@ -1,11 +1,14 @@
 def get_audio_model(name):
     from model.hubert import HuBert
     from model.audio_lstm import Audio_LSTM
+    from model.audio_stft_cnn import AudioStftCnn
             
     if name == 'LSTM':
         audio_model = Audio_LSTM()
     elif name == 'HuBert':
         audio_model = HuBert(sample_rate=16000)
+    elif name == 'STFT_CNN':
+        audio_model = AudioStftCnn()
     else:
         raise NotImplementedError
     return audio_model
@@ -38,7 +41,7 @@ def get_dataset(name, tokenizer):
         dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, length=1.5)
         train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
         val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
-        num_class = 2
+        num_class = 3
     elif name == 'ETRI':
         train_dataset = ETRI_Corpus_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
         val_dataset = ETRI_Corpus_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
@@ -55,11 +58,13 @@ def get_dataset(name, tokenizer):
 def get_backchannel_prediction_model(name):
     from model.bpm_mt import BPM_MT, BPM_ST
     from model.ours import Ours
+    from model.adversarial import Adversarial
     try:
         return {
             'BPM_MT': BPM_MT,
             'BPM_ST': BPM_ST,
             'Ours': Ours,
+            'ADV' : Adversarial,
         }[name]
     except:
         raise NotImplementedError

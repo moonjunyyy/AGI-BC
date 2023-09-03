@@ -7,3 +7,5 @@ ETRI_preprocess.py
 *.pt
 *.png
 *.pyc
+*.wav
+*.txt

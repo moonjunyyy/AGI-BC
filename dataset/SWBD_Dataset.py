@@ -1,5 +1,4 @@
 import os
-import shutil
 import pandas as pd
 import torch
 import torch.nn.functional as F
@@ -22,12 +21,12 @@ class SWBD_Dataset(Dataset):
         self.path = os.path.join(path, "swbd")
         # shutil.rmtree(self.path, ignore_errors=True)
         if os.path.isdir(self.path) == False:
-            # os.makedirs(self.path, exist_ok=True)
-            os.system(f"cp /data/datasets/swbd.tar {path}/")
-            os.system(f"chmod 777 {path}/swbd.tar")
-            os.system(f"tar -xvf {path}/swbd.tar -C {path}")
-            os.system(f"chmod -R 777  {self.path}/*")
-            os.system(f"rm {path}/swbd.tar")
+            print("Extracting SWBD_Dataset...")
+            import shutil
+            import tarfile
+            shutil.copy("/data/datasets/swbd.tar", path)
+            tarfile.open(f"{path}/swbd.tar").extractall(path)
+            shutil.rmtree(f"{path}/swbd.tar", ignore_errors=True)
         self.length = length
         self.dataframe = pd.read_csv(os.path.join(self.path, "swbd.tsv"), sep='\t', index_col=0)
         # self.dataframe.rename( columns={'Unnamed: 0':'filename'}, inplace=True )

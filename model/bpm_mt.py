@@ -47,16 +47,18 @@ class BPM_ST(nn.Module):
             audio = self.audio_model(audio)
         if self.mode != "audio_only":
             text, _ = self.language_model(text)
-        
+
         if self.mode == "flatten":
             audio = audio.reshape(AB, -1)
-            concat = torch.cat((audio, text.reshape(TB, -1)), dim=1)
             text = text[:,0,:]
+            concat = torch.cat((audio, text.reshape(TB, -1)), dim=1)
         elif self.mode == "audio_only":
             concat = audio.mean(dim=1)
         elif self.mode == "text_only":
             concat = text[:, 0, :]
         else:
+            audio = audio.mean(dim=1)
+            text = text[:, 0, :]
             concat = torch.cat((audio, text), dim=1)
 
         x = self.fc_layer_1(self.dropout(concat))

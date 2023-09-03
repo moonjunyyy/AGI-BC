@@ -1,6 +1,6 @@
 import argparse
-import torch
 from util.trainer import Trainer
+from warnings import filterwarnings
 
 def main():
     parser = argparse.ArgumentParser()

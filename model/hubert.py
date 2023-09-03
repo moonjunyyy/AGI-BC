@@ -10,9 +10,6 @@ class HuBert(nn.Module):
         # self.processor = AutoProcessor.from_pretrained("facebook/hubert-base-ls960")
         self.processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960") 
         self.model = AutoModel.from_pretrained("facebook/hubert-base-ls960")
-
-        for n, p in self.model.named_parameters():
-            self.register_parameter(n, p)
         self.sample_rate = sample_rate
 
     def forward(self, x):
