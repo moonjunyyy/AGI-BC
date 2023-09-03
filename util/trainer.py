@@ -24,6 +24,7 @@ class Trainer:
     def __init__(self, args) -> None:
         print(args)
 
+        self.path = args.path
         self.mode = args.mode
         self.criteria = get_criterion(self.mode)
 
@@ -51,6 +52,8 @@ class Trainer:
         self.world_size = args.world_size * self.ngpus_per_node
         self.distributed = self.world_size > 1
 
+        if os.path.exists(self.path) is False:
+            os.makedirs(self.path)
         self.batch_size = int(self.batch_size / self.world_size)
 
         print("is_MT: ", self.is_MT)
@@ -94,7 +97,7 @@ class Trainer:
         self.val_sampler = torch.utils.data.distributed.DistributedSampler(self.val_dataset, shuffle=False, num_replicas=self.world_size, rank=self.rank)
         self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
-
+        
         self.model = get_backchannel_prediction_model(self.model)(
             language_model=language_model,
             audio_model=audio_model,
@@ -102,7 +105,9 @@ class Trainer:
             num_class=self.num_class,
             sentiment_output_size=64,
             dropout=0.3,
-            mode=self.mode, tokenizer = tokenizer)
+            mode=self.mode,
+            tokenizer=tokenizer,
+            path=self.path)
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
         if self.distributed:
@@ -137,9 +142,10 @@ class Trainer:
         # optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
         ca_optimizer = torch.optim.Adam(cross_attention_params, lr=1e-5, weight_decay=self.weight_decay)
         lora_optimizer = torch.optim.Adam(lora_params, lr=1e-5, weight_decay=self.weight_decay)
+        self.pretext_epoch = 100
 
         try:
-            state_dict = torch.load(f'pretrained_{self.mode}.pt')
+            state_dict = torch.load(f'{self.path}/pretrained.pt')
             self.model_without_ddp.load_state_dict(state_dict)
             print('Load pretrained model')
         except Exception as e:
@@ -147,7 +153,7 @@ class Trainer:
             print('No pretrained model')
             if hasattr(self.model_without_ddp, 'pretext_forward'):
                 # koalpaca = KoAlpaca()
-                for epoch in range(self.epochs * 10):
+                for epoch in range(self.pretext_epoch):
                     self.train_sampler.set_epoch(epoch)
                     pre_loss = 0
                     pre_count = 0
@@ -171,12 +177,12 @@ class Trainer:
                             # print("Epoch : {}, {}/{},  Loss : {:.6f}".format(epoch, b+1, len(self.train_dataloader), loss.item()), end='\r')
                             # ta, fa, tt, ft = self.model_without_ddp.get_generation_result(batch, tokenizer)
                     print(f'Epoch : {epoch}, Loss : {pre_loss/pre_count:.6f}', " "*20)
-                torch.save(self.model_without_ddp.state_dict(), f'pretrained_{self.mode}.pt')
+                    torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
             else:
                 print('No pretext training')
 
         for epoch in range(self.epochs):
-            self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.epochs * 10)
+            self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.pretext_epoch)
             for b, batch in enumerate(self.train_dataloader):
                 
                 # Move the batch to GPU if CUDA is available

@@ -14,11 +14,10 @@ from layer.lora import Lora
 from typing import Tuple
 
 class Adversarial(nn.Module):
-    def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy", tokenizer=None):
+    def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy", tokenizer=None, path=None):
         super(Adversarial, self).__init__()
 
-        self.path = os.environ.get('SLURM_JOB_ID', '0')
-        os.makedirs(self.path, exist_ok=True)
+        self.path = path
 
         self.mode = mode
         if self.mode != "audio_only":
@@ -94,8 +93,6 @@ class Adversarial(nn.Module):
         self.g_loss = torch.empty(0)
         self.real_d_loss = torch.empty(0)
         self.fake_d_loss = torch.empty(0)
-        self.consistency_loss = torch.empty(0)
-        self.disc_consistency_loss = torch.empty(0)
 
     def pretext_forward(self, x):
         self.tik_tok = not self.tik_tok
@@ -103,10 +100,13 @@ class Adversarial(nn.Module):
         if self.tik_tok:
             # Discriminator Training
             text = x["text"]
-            text_max_len = (text==3).nonzero()[:,1].max()
+            sep_pos = (text == 3).nonzero()
+            text_max_len = sep_pos[:,1].max()
+            generated_token_pos = sep_pos.repeat_interleave(self.predict_length, dim=0)
+            generated_token_pos += torch.cat((torch.zeros_like(generated_token_pos[:, :1]), torch.arange(self.predict_length).repeat(sep_pos.shape[0]).to(text.device).unsqueeze(1)), dim=1)
 
             real_audio_tokens, real_text_tokens = self.real_tokens(x)
-            real_text_tokens = real_text_tokens[:, :text_max_len]
+            # real_text_tokens = real_text_tokens[:, :text_max_len]
 
             fake_audio_tokens, fake_text_tokens = self.generate(x)
 
@@ -115,21 +115,20 @@ class Adversarial(nn.Module):
             t_to_a_audio_pred, t_to_a_text_pred = self.discriminate(fake_audio_tokens, real_text_tokens)
             fake_audio_pred, fake_text_pred = self.discriminate(fake_audio_tokens, fake_text_tokens)
 
-            # Focal Loss
-            # real_d_loss = - ((1 - real_audio_pred) ** 2 *  real_audio_pred.log()).mean() - ((1 - real_text_pred) ** 2 *  real_text_pred.log()).mean()
-            # fake_d_loss = - (fake_audio_pred ** 2 * (1 - fake_audio_pred).log()).mean() - (fake_text_pred ** 2 * (1 - fake_text_pred).log()).mean()
-            # Normal Loss
+            real_audio_pred = real_audio_pred[:, 74:].flatten(0,1)
+            real_text_pred = real_text_pred[generated_token_pos[:,0], generated_token_pos[:,1]]
+            fake_audio_pred = fake_audio_pred[:, 74:].flatten(0,1)
+            fake_text_pred = fake_text_pred[generated_token_pos[:,0], generated_token_pos[:,1]]
+            a_to_t_audio_pred = a_to_t_audio_pred[:, 74:].flatten(0,1)
+            a_to_t_text_pred = a_to_t_text_pred[generated_token_pos[:,0], generated_token_pos[:,1]]
+            t_to_a_audio_pred = t_to_a_audio_pred[:, 74:].flatten(0,1)
+            t_to_a_text_pred = t_to_a_text_pred[generated_token_pos[:,0], generated_token_pos[:,1]]
+
             real_d_loss = - real_audio_pred.log().mean() - real_text_pred.log().mean() - a_to_t_audio_pred.log().mean() - t_to_a_text_pred.log().mean()
             fake_d_loss = - (1 - a_to_t_text_pred).log().mean() - (1 - t_to_a_audio_pred).log().mean() - (1 - fake_audio_pred).log().mean() - (1 - fake_text_pred).log().mean()
             # Make a log
             self.real_d_loss = torch.cat((self.real_d_loss, real_d_loss.unsqueeze(0).detach().cpu()))
             self.fake_d_loss = torch.cat((self.fake_d_loss, fake_d_loss.unsqueeze(0).detach().cpu()))
-
-            audio_consistency_loss = F.mse_loss(fake_audio_tokens[:, :74], real_audio_tokens[:, :74])
-            text_consistency_loss = F.mse_loss(fake_text_tokens[:, :text_max_len], real_text_tokens[:, :text_max_len])
-            fake_consistency_loss = audio_consistency_loss + text_consistency_loss
-            fake_consistency_loss.backward(retain_graph=True)
-            self.disc_consistency_loss = torch.cat((self.disc_consistency_loss, fake_consistency_loss.unsqueeze(0).detach().cpu()))
 
             d_loss = real_d_loss + fake_d_loss
             print(f"RA : {real_audio_pred.mean():.6f}, RT : {real_text_pred.mean():.6f}, FA : {fake_audio_pred.mean():.6f}, FT : {fake_text_pred.mean():.6f}", end=' ')
@@ -142,6 +141,9 @@ class Adversarial(nn.Module):
             original_text_tokens = sep_pos.repeat_interleave(max_len, dim=0)
             original_text_tokens -= torch.cat((torch.zeros_like(original_text_tokens[:,0:1]), torch.arange(max_len).repeat(len(sep_pos)).unsqueeze(1).to(x["text"].device)), dim=1)
             original_text_tokens = original_text_tokens[original_text_tokens[:,1] > 0]
+            
+            generated_token_pos = sep_pos.repeat_interleave(self.predict_length, dim=0)
+            generated_token_pos += torch.cat((torch.zeros_like(generated_token_pos[:, :1]), torch.arange(self.predict_length).repeat(sep_pos.shape[0]).to(x["text"].device).unsqueeze(1)), dim=1)
 
             real_audio_tokens, real_text_tokens = self.real_tokens(x)
             fake_audio_tokens, fake_text_tokens = self.generate(x)
@@ -149,11 +151,12 @@ class Adversarial(nn.Module):
             t_to_a_audio_pred, t_to_a_text_pred = self.discriminate(fake_audio_tokens, real_text_tokens)
             fake_audio_pred, fake_text_pred = self.discriminate(fake_audio_tokens, fake_text_tokens)
 
-            text_consistency_loss = F.mse_loss(fake_text_tokens[original_text_tokens[:,0], original_text_tokens[:,1]], real_text_tokens[original_text_tokens[:,0], original_text_tokens[:,1]])
-            audio_consistency_loss = F.mse_loss(fake_audio_tokens[:, :74], real_audio_tokens[:, :74])
-            consistency_loss = (text_consistency_loss + audio_consistency_loss)
-            consistency_loss.backward(retain_graph=True)
-            self.consistency_loss = torch.cat((self.consistency_loss, consistency_loss.unsqueeze(0).detach().cpu()))
+            a_to_t_audio_pred = a_to_t_audio_pred[:, 74:].flatten(0,1)
+            a_to_t_text_pred = a_to_t_text_pred[generated_token_pos[:,0], generated_token_pos[:,1]]
+            t_to_a_audio_pred = t_to_a_audio_pred[:, 74:].flatten(0,1)
+            t_to_a_text_pred = t_to_a_text_pred[generated_token_pos[:,0], generated_token_pos[:,1]]
+            fake_audio_pred = fake_audio_pred[:, 74:].flatten(0,1)
+            fake_text_pred = fake_text_pred[generated_token_pos[:,0], generated_token_pos[:,1]]
 
             # Focal Loss
             # g_loss = - ((1 - fake_audio_pred)** 2 * fake_audio_pred.log()).mean() - ((1 - fake_text_pred) ** 2 * fake_text_pred.log()).mean()
@@ -163,7 +166,7 @@ class Adversarial(nn.Module):
 
             decoded_text = self.decode_text(fake_text_tokens)
             total_text = self.tokenizer.batch_decode(torch.cat((x["text"], x["target_text"]), dim=1), skip_special_tokens=True)
-            print(f"G Loss: {g_loss:.6f}, C Loss: {consistency_loss:.6f}, Text: {total_text[0]} -> {decoded_text[0]}")
+            print(f"G Loss: {g_loss:.6f}, Text: {total_text[0]} -> {decoded_text[0]}")
             plt.plot(self.g_loss.numpy(), label='Generator Loss')
             plt.plot(self.real_d_loss.numpy(), label='Real Discriminator Loss')
             plt.plot(self.fake_d_loss.numpy(), label='Fake Discriminator Loss')
@@ -174,16 +177,6 @@ class Adversarial(nn.Module):
             ax.set_ylim([None, mean + std * 3])
             plt.legend()
             plt.savefig(f"{self.path}/loss.png")
-            plt.clf()
-            plt.plot(self.consistency_loss.detach().cpu().numpy(), label='Consistency Loss')
-            plt.plot(self.disc_consistency_loss.detach().cpu().numpy(), label='Discriminator Consistency Loss')
-            total_data = torch.cat((self.consistency_loss, self.disc_consistency_loss))
-            std = total_data.std()
-            mean = total_data.mean()
-            ax = plt.gca()
-            ax.set_ylim([None, mean + std * 3])
-            plt.legend()
-            plt.savefig(f"{self.path}/consistency_loss.png")
             plt.clf()
 
             if self.counter % 1000 == 0:
@@ -197,20 +190,28 @@ class Adversarial(nn.Module):
         original_text_tokens = x["text"].clone()
         real_audio_tokens, real_text_tokens = self.real_tokens(x)
         sep_pos = (original_text_tokens == 3).nonzero()
-        fake_text_tokens = self.pad_mask_token(original_text_tokens)
-        if real_text_tokens.shape[1] > fake_text_tokens.shape[1]:
-            fake_text_tokens = torch.cat((fake_text_tokens, torch.ones_like(fake_text_tokens[:, :real_text_tokens.shape[1]-fake_text_tokens.shape[1]])), dim=1)
-        fake_text_tokens = self.language_model.embeddings(fake_text_tokens)
+        max_len = sep_pos[:,1].max()
+        original_text_token_pos = sep_pos.repeat_interleave(max_len, dim=0)
+        original_text_token_pos -= torch.cat((torch.zeros_like(original_text_token_pos[:,0:1]), torch.arange(max_len).repeat(len(sep_pos)).unsqueeze(1).to(x["text"].device)), dim=1)
+        original_text_token_pos = original_text_token_pos[original_text_token_pos[:,1] > 0]
 
-        fake_audio_tokens = x["audio"][:, 0, :]
-        fake_audio_tokens = self.audio_model.model.feature_extractor(fake_audio_tokens)
-        fake_audio_tokens = self.audio_model.model.feature_projection(fake_audio_tokens.transpose(1,2))
-        fake_audio_tokens = torch.cat((fake_audio_tokens, self.audio_mask_token.repeat(fake_audio_tokens.shape[0], 24, 1)), dim=1)
+        original_text_tokens = self.pad_mask_token(original_text_tokens)
+        original_text_tokens = self.language_model.embeddings(original_text_tokens)
 
-        _, text_tokens = self.unified_encoder(real_audio_tokens, fake_text_tokens)
-        audio_tokens, _ = self.unified_encoder(fake_audio_tokens, real_text_tokens)
-        audio_tokens = self.generator_audio_affine(audio_tokens) + real_audio_tokens
-        text_tokens = self.generator_text_affine(text_tokens)
+        original_audio_tokens = x["audio"][:, 0, :]
+        original_audio_tokens = self.audio_model.model.feature_extractor(original_audio_tokens)
+        original_audio_tokens = self.audio_model.model.feature_projection(original_audio_tokens.transpose(1,2))
+        original_audio_tokens = torch.cat((original_audio_tokens, self.audio_mask_token.repeat(original_audio_tokens.shape[0], 24, 1)), dim=1)
+
+        audio_tokens, text_tokens = self.unified_encoder(original_audio_tokens, original_text_tokens)
+        audio_tokens = self.generator_audio_affine(audio_tokens)
+        text_tokens = self.generator_text_affine(text_tokens) + original_text_tokens
+
+        audio_tokens[:, :74] = 0
+        text_tokens[original_text_token_pos[:,0], original_text_token_pos[:,1]] = 0
+
+        audio_tokens = audio_tokens + original_audio_tokens
+        text_tokens = text_tokens + original_text_tokens
 
         return audio_tokens, text_tokens
     
@@ -218,11 +219,11 @@ class Adversarial(nn.Module):
         #74, 788
         audio_tokens, text_tokens = self.unified_encoder(audio_tokens, text_tokens)
 
-        audio_pred = audio_tokens.mean(dim=1)
-        text_pred = text_tokens.mean(dim=1)
+        # audio_pred = audio_tokens.mean(dim=1)
+        # text_pred = text_tokens.mean(dim=1)
 
-        audio_pred = self.audio_disriminator_head(audio_pred)
-        text_pred = self.text_disriminator_head(text_pred)
+        audio_pred = self.audio_disriminator_head(audio_tokens)
+        text_pred = self.text_disriminator_head(text_tokens)
 
         return audio_pred, text_pred
 
@@ -389,15 +390,8 @@ class Adversarial(nn.Module):
         audio = x["audio"][:, 0, :]
         text  = x["text"]
         B, L = text.shape
-        text = self.pad_mask_token(text)
-        text = self.language_model.embeddings(text)
-
-        audio = self.audio_model.model.feature_extractor(audio)
-        audio = self.audio_model.model.feature_projection(audio.transpose(1,2))
-        # 74, 768
-        audio = torch.cat((audio, self.audio_mask_token.repeat(B, 24, 1)), dim=1)
-        audio,text = self.unified_encoder(audio, text)
-
+        audio, text = self.generate(x)
+        
         self.lora_mode('classifier', requires_grad=True)
         audio,text = self.unified_encoder(audio, text)
 

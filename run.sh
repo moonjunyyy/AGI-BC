@@ -53,5 +53,5 @@ do
     --lr 0.0005 \
     --dropout 0.3 \
     --world_size $WORLD_SIZE \
-    --rank $SLURM_PROCID ${4}
+    --rank $SLURM_PROCID ${@:4}
 done

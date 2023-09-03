@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--dist_backend', type=str, default='nccl')
     parser.add_argument('--dist_url', type=str, default='tcp://')
     parser.add_argument('--mode', type=str, default='cross_entropy')
+    parser.add_argument('--path', type=str, default='save path')
     args = parser.parse_args()
 
     trainer = Trainer(args)
