@@ -153,10 +153,10 @@ class Trainer:
                         pre_count += 1
                         tiktok = not tiktok
                         if tiktok:
-                            optimizer.param_groups[0]['lr'] = 1e-5
-                            optimizer.param_groups[0]['weight_decay'] = 0.01
+                            optimizer.param_groups[0]['lr'] = 1e-4
+                            optimizer.param_groups[0]['weight_decay'] = 0.001
                         else:
-                            optimizer.param_groups[0]['lr'] = 1e-5
+                            optimizer.param_groups[0]['lr'] = 1e-4
                             optimizer.param_groups[0]['weight_decay'] = self.weight_decay
                         for key in batch:
                             batch[key] = batch[key].to(self.local_rank)

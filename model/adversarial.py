@@ -55,19 +55,23 @@ class Adversarial(nn.Module):
         self.audio_classifier_lora = nn.ModuleDict()
         self.text_classifier_lora = nn.ModuleDict()
 
-        for name, modules in self.audio_model.named_modules():
-            if isinstance(modules, nn.Linear) and\
-               'q_proj' in name or 'k_proj' in name or 'v_proj' in name:
-                self.audio_generator_lora[name.replace('.', '')] = LoRA(modules, 768, 64, alpha=32)
-                self.audio_discriminator_lora[name.replace('.', '')] = LoRA(modules, 768, 64, alpha=32)
-                self.audio_classifier_lora[name.replace('.', '')] = LoRA(modules, 768, 64, alpha=32)
+        for name, module in self.audio_model.named_modules():
+            # if isinstance(modules, nn.Linear) and\
+            #    'q_proj' in name or 'k_proj' in name or 'v_proj' in name:
+            if isinstance(module, nn.Linear) and \
+                ('_proj' in name or 'dense' in name ):
+                self.audio_generator_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
+                self.audio_discriminator_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
+                self.audio_classifier_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
 
-        for name, modules in self.language_model.named_modules():
-            if isinstance(modules, nn.Linear) and\
-               'query' in name or 'key' in name or 'value' in name:
-                self.text_generator_lora[name.replace('.', '')] = LoRA(modules, 768, 64, alpha=32)
-                self.text_discriminator_lora[name.replace('.', '')] = LoRA(modules, 768, 64, alpha=32)
-                self.text_classifier_lora[name.replace('.', '')] = LoRA(modules, 768, 64, alpha=32)
+        for name, module in self.language_model.named_modules():
+            # if isinstance(modules, nn.Linear) and\
+            #    'query' in name or 'key' in name or 'value' in name:
+            if isinstance(module, nn.Linear) and \
+               ('query' in name or 'key' in name or 'value' in name or 'dense' in name) :
+                self.text_generator_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
+                self.text_discriminator_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
+                self.text_classifier_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
 
         self.lora_mode('discriminator', requires_grad=False)
 
@@ -263,7 +267,8 @@ class Adversarial(nn.Module):
         elif mode == 'classifier':
             dictionary = self.audio_classifier_lora
         for name, modules in self.audio_model.named_modules():
-            if 'q_proj' in name or 'k_proj' in name or 'v_proj' in name:
+            # if 'q_proj' in name or 'k_proj' in name or 'v_proj' in name:
+            if isinstance(modules, nn.Linear) or isinstance(modules, LoRA):
                 _name = name.split('.')
                 _module = self.audio_model
                 for i in range(len(_name)-1):
@@ -280,7 +285,8 @@ class Adversarial(nn.Module):
         elif mode == 'classifier':
             dictionary = self.text_classifier_lora
         for name, modules in self.language_model.named_modules():
-            if 'query' in name or 'key' in name or 'value' in name:
+            if isinstance(modules, nn.Linear) or isinstance(modules, LoRA):
+            # if 'query' in name or 'key' in name or 'value' in name:
                 _name = name.split('.')
                 _module = self.language_model
                 for i in range(len(_name)-1):
@@ -355,8 +361,9 @@ class Adversarial(nn.Module):
     def decode_audio(self, audio_tokens:torch.Tensor, length:int)->torch.Tensor:
         B, L, D = audio_tokens.shape
         synthtic_audio = torch.randn(B, length, requires_grad=True, device=audio_tokens.device)
-        optimizer = torch.optim.AdamW([synthtic_audio], lr=0.1)
+        optimizer = torch.optim.Adam([synthtic_audio], lr=0.1)
         # print("\nDecoding Audio")
+        self.audio_model.eval()
         for i in range(1000):
             optimizer.zero_grad()
             audio = self.audio_model.model.feature_extractor(synthtic_audio)
@@ -364,7 +371,7 @@ class Adversarial(nn.Module):
             loss = F.mse_loss(audio, audio_tokens)
             loss.backward(retain_graph=True)
             optimizer.step()
-            # print(f"{i}/{1000} loss: {loss:.6f}", end='\r')
+        self.audio_model.train()
         print()
         return synthtic_audio
     
