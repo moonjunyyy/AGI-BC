@@ -131,24 +131,16 @@ class Trainer:
         # sgd_optimizer = torch.optim.SGD(bert_params, lr=1e-4)
         # if prompt_params != []:
         #     adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0001, 'weight_decay': self.weight_decay})
-
-        cross_attention_params = []
-        lora_params = []
-        for name, param in self.model.named_parameters():
-            if 'audio_to_text_attention' in name or 'text_to_audio_attention' in name:
-                cross_attention_params.append(param)
-            elif 'lora' in name:
-                lora_params.append(param)
         # optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
-        ca_optimizer = torch.optim.Adam(cross_attention_params, lr=1e-5, weight_decay=self.weight_decay)
-        lora_optimizer = torch.optim.Adam(lora_params, lr=1e-5, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-5, weight_decay=self.weight_decay)
         self.pretext_epoch = 100
-
+        self.model.train()
         try:
             state_dict = torch.load(f'{self.path}/pretrained.pt')
             self.model_without_ddp.load_state_dict(state_dict)
             print('Load pretrained model')
         except Exception as e:
+            tiktok = False
             print(e)
             print('No pretrained model')
             if hasattr(self.model_without_ddp, 'pretext_forward'):
@@ -159,6 +151,13 @@ class Trainer:
                     pre_count = 0
                     for b, batch in enumerate(self.train_dataloader):
                         pre_count += 1
+                        tiktok = not tiktok
+                        if tiktok:
+                            optimizer.param_groups[0]['lr'] = 1e-5
+                            optimizer.param_groups[0]['weight_decay'] = 0.01
+                        else:
+                            optimizer.param_groups[0]['lr'] = 1e-5
+                            optimizer.param_groups[0]['weight_decay'] = self.weight_decay
                         for key in batch:
                             batch[key] = batch[key].to(self.local_rank)
                         # print(f"Epoch : {epoch}, {b+1}/{len(self.train_dataloader)}", end=' ')
@@ -166,23 +165,23 @@ class Trainer:
                         loss = loss.mean()
                         pre_loss += loss.item()
                         # Zero the gradients
-                        ca_optimizer.zero_grad()
-                        lora_optimizer.zero_grad()
+                        optimizer.zero_grad()
                         # Backpropagation
                         loss.backward()
                         # Update the model parameters
-                        ca_optimizer.step()
-                        lora_optimizer.step()
+                        optimizer.step()
                         # if self.verbose:
                             # print("Epoch : {}, {}/{},  Loss : {:.6f}".format(epoch, b+1, len(self.train_dataloader), loss.item()), end='\r')
                             # ta, fa, tt, ft = self.model_without_ddp.get_generation_result(batch, tokenizer)
                     print(f'Epoch : {epoch}, Loss : {pre_loss/pre_count:.6f}', " "*20)
                     torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
+                    sys.stdout.flush()
             else:
                 print('No pretext training')
 
         for epoch in range(self.epochs):
             self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.pretext_epoch)
+            self.model.train()
             for b, batch in enumerate(self.train_dataloader):
                 
                 # Move the batch to GPU if CUDA is available
@@ -210,6 +209,7 @@ class Trainer:
                 l, c = logit.argmax(dim=-1).unique(return_counts=True)
                 gc.collect()
 
+            self.model.eval()
             with torch.no_grad():
 
                 accuracy = 0
