@@ -132,7 +132,19 @@ class Trainer:
         # if prompt_params != []:
         #     adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0001, 'weight_decay': self.weight_decay})
         # optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-5, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-6, weight_decay=self.weight_decay)
+
+        # generator_params = []
+        # discriminator_params = []
+        # for name, param in self.model.named_parameters():
+        #     if 'generator' in name:
+        #         generator_params.append(param)
+        #     elif 'discriminator' in name:
+        #         discriminator_params.append(param)
+        
+        # discriminator_optimizer = torch.optim.Adam(discriminator_params, lr=1e-4, weight_decay=self.weight_decay)
+        # generator_optimizer = torch.optim.Adam(generator_params, lr=1e-4, weight_decay=self.weight_decay)
+
         self.pretext_epoch = 100
         self.model.train()
         try:
@@ -153,11 +165,9 @@ class Trainer:
                         pre_count += 1
                         tiktok = not tiktok
                         if tiktok:
-                            optimizer.param_groups[0]['lr'] = 1e-4
-                            optimizer.param_groups[0]['weight_decay'] = 0.001
+                            optimizer.param_groups[0]['lr'] = 5e-7
                         else:
-                            optimizer.param_groups[0]['lr'] = 1e-4
-                            optimizer.param_groups[0]['weight_decay'] = self.weight_decay
+                            optimizer.param_groups[0]['lr'] = 5e-5
                         for key in batch:
                             batch[key] = batch[key].to(self.local_rank)
                         # print(f"Epoch : {epoch}, {b+1}/{len(self.train_dataloader)}", end=' ')
@@ -179,6 +189,7 @@ class Trainer:
             else:
                 print('No pretext training')
 
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
         for epoch in range(self.epochs):
             self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.pretext_epoch)
             self.model.train()
