@@ -132,7 +132,7 @@ class Trainer:
         # if prompt_params != []:
         #     adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0001, 'weight_decay': self.weight_decay})
         # optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-6, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
 
         # generator_params = []
         # discriminator_params = []
@@ -152,37 +152,34 @@ class Trainer:
             self.model_without_ddp.load_state_dict(state_dict)
             print('Load pretrained model')
         except Exception as e:
-            tiktok = False
             print(e)
             print('No pretrained model')
             if hasattr(self.model_without_ddp, 'pretext_forward'):
-                # koalpaca = KoAlpaca()
                 for epoch in range(self.pretext_epoch):
+                    optimizer.param_groups[0]['lr'] = 1e-4 * (self.pretext_epoch - epoch) / self.pretext_epoch
                     self.train_sampler.set_epoch(epoch)
                     pre_loss = 0
                     pre_count = 0
                     for b, batch in enumerate(self.train_dataloader):
                         pre_count += 1
-                        tiktok = not tiktok
-                        if tiktok:
-                            optimizer.param_groups[0]['lr'] = 5e-7
-                        else:
-                            optimizer.param_groups[0]['lr'] = 5e-5
                         for key in batch:
                             batch[key] = batch[key].to(self.local_rank)
                         # print(f"Epoch : {epoch}, {b+1}/{len(self.train_dataloader)}", end=' ')
                         loss = self.model_without_ddp.pretext_forward(batch)
-                        loss = loss.mean()
                         pre_loss += loss.item()
-                        # Zero the gradients
+
                         optimizer.zero_grad()
-                        # Backpropagation
                         loss.backward()
-                        # Update the model parameters
                         optimizer.step()
-                        # if self.verbose:
-                            # print("Epoch : {}, {}/{},  Loss : {:.6f}".format(epoch, b+1, len(self.train_dataloader), loss.item()), end='\r')
-                            # ta, fa, tt, ft = self.model_without_ddp.get_generation_result(batch, tokenizer)
+                        print(f"Epoch : {epoch}, {b+1}/{len(self.train_dataloader)} Loss : {loss.item():.6f}", end='\r')
+                        if b == 0:
+                            generated_audio, generated_text = self.model_without_ddp.generate(batch)
+                            generated_audio = self.model_without_ddp.decode_audio(generated_audio[:1], 8000)
+                            generated_audio = torch.cat((batch['audio'][0,:1,:], generated_audio), dim=-1)
+                            generated_text = self.model_without_ddp.decode_text(generated_text)
+                            generated_audio = generated_audio.detach().cpu()
+                            print(batch["target_text"], " => " , generated_text[0])
+                            torchaudio.save(f'{self.path}/generated_{epoch}.wav', generated_audio.reshape(1, -1), 16000)
                     print(f'Epoch : {epoch}, Loss : {pre_loss/pre_count:.6f}', " "*20)
                     torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
                     sys.stdout.flush()
@@ -193,6 +190,11 @@ class Trainer:
         for epoch in range(self.epochs):
             self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.pretext_epoch)
             self.model.train()
+
+            self.model.fc_layer_1 = nn.Linear(768*2, 128).to(self.local_rank)
+            self.model.dropout = nn.Dropout(0.3).to(self.local_rank)
+            self.model.classifier = nn.Linear(128, self.num_class).to(self.local_rank)
+
             for b, batch in enumerate(self.train_dataloader):
                 
                 # Move the batch to GPU if CUDA is available

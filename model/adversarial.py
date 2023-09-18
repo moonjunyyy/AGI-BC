@@ -1,5 +1,6 @@
 import os
 import copy
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +14,28 @@ from layer.self_attention_layer import SelfAttentionLayer
 from layer.lora import LoRA
 from typing import Tuple
 
+class time_embedding(nn.Module):
+    def __init__(self, dimension=768):
+        super().__init__()
+        self.dimension = dimension
+        self.fc1 = nn.Linear(self.dimension, self.dimension)
+        self.activation = nn.GELU()
+        self.fc2 = nn.Linear(self.dimension, self.dimension)
+
+    def forward(self, step):
+        half_dim = self.dimension // 2
+        embeding = torch.arange(half_dim, dtype=torch.float32, device=self.fc1.weight.device)
+        embeding = embeding.unsqueeze(0).repeat(2, 1)
+        embeding = embeding.transpose(0, 1).reshape(-1)
+        embeding = torch.exp(-math.log(10000) * embeding / (half_dim - 1))
+        embeding = step[:, None] * embeding[None, :]
+        embeding = torch.cat([torch.sin(embeding[:, 0::2]), torch.cos(embeding[:, 1::2])], dim=-1)
+        embeding = embeding
+        embeding = self.fc1(embeding)
+        embeding = self.activation(embeding)
+        embeding = self.fc2(embeding)
+        return embeding.unsqueeze(1)
+    
 class Adversarial(nn.Module):
     def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy", tokenizer=None, path=None):
         super(Adversarial, self).__init__()
@@ -45,158 +68,123 @@ class Adversarial(nn.Module):
 
         self.audio_to_text_attention = nn.ModuleList([CrossAttentionLayer(768, 8, 0.3) for _ in range(12)])
         self.text_to_audio_attention = nn.ModuleList([CrossAttentionLayer(768, 8, 0.3) for _ in range(12)])
+       
+        self.num_steps = 100
+        betas = torch.linspace(0.0001, 0.02, self.num_steps)
+        self.register_buffer('betas', betas)
+        alphas = 1 - self.betas
+        self.register_buffer('alphas', alphas)
+        alpha_bars = self.alphas.cumprod(dim=0)
+        self.register_buffer('alpha_bars', alpha_bars)
 
-        self.audio_generator_lora = nn.ModuleDict()
-        self.text_generator_lora = nn.ModuleDict()
-
-        self.audio_discriminator_lora = nn.ModuleDict()
-        self.text_discriminator_lora = nn.ModuleDict()
-
-        self.audio_classifier_lora = nn.ModuleDict()
-        self.text_classifier_lora = nn.ModuleDict()
-
-        for name, module in self.audio_model.named_modules():
-            # if isinstance(modules, nn.Linear) and\
-            #    'q_proj' in name or 'k_proj' in name or 'v_proj' in name:
-            if isinstance(module, nn.Linear) and \
-                ('_proj' in name or 'dense' in name ):
-                self.audio_generator_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
-                self.audio_discriminator_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
-                self.audio_classifier_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
-
-        for name, module in self.language_model.named_modules():
-            # if isinstance(modules, nn.Linear) and\
-            #    'query' in name or 'key' in name or 'value' in name:
-            if isinstance(module, nn.Linear) and \
-               ('query' in name or 'key' in name or 'value' in name or 'dense' in name) :
-                self.text_generator_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
-                self.text_discriminator_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
-                self.text_classifier_lora[name.replace('.', '')] = LoRA(module, 64, alpha=32)
-
-        self.lora_mode('discriminator', requires_grad=False)
-
-        self.generator_audio_affine = nn.Linear(768, 768)
-        self.generator_text_affine = nn.Linear(768, 768)
-        self.audio_disriminator_head = nn.Sequential(
-            nn.Linear(768, 1),
-            nn.Sigmoid()
+        embedding_dim = 768
+        class ConvBlock(nn.Module):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.conv1 = nn.Conv1d(embedding_dim*4, embedding_dim*4, 3, padding=1)
+                self.norm1 = nn.BatchNorm1d((embedding_dim*4, ))
+                self.activation = nn.GELU()
+            def forward(self, x):
+                return x + self.activation(self.norm1(self.conv1(x)))
+        self.register_module('audio_decoder', nn.Sequential(
+            nn.Conv1d(embedding_dim*2, embedding_dim*4, 1),
+            *[ConvBlock() for _ in range(12)],
+            nn.Conv1d(embedding_dim*4, embedding_dim, 1),
+        ))
+        self.text_decoder = nn.Sequential(
+            nn.Conv1d(embedding_dim*2, embedding_dim*4, 1),
+            *[ConvBlock() for _ in range(12)],
+            nn.Conv1d(embedding_dim*4, embedding_dim, 1),
         )
-        self.text_disriminator_head = nn.Sequential(
-            nn.Linear(768, 1),
-            nn.Sigmoid()
-        )
-
-        self.dropout = nn.Dropout(dropout)
-        self.fc_layer_1 = nn.Linear(768 * 2, output_size)
-        self.classifier = nn.Linear(output_size, num_class)
-
-        self._lora_mode = None
-        self.tik_tok = False
-        self.counter = 0
-
-        # loss log
-        self.g_loss = torch.empty(0)
-        self.real_d_loss = torch.empty(0)
-        self.fake_d_loss = torch.empty(0)
+        self.register_module('time_embedding', time_embedding(embedding_dim * 2))
 
     def pretext_forward(self, x):
-        self.tik_tok = not self.tik_tok
-        self.counter += 1
-        if self.counter < 0:
-            self.lora_mode('generator', requires_grad=True)
-            generatec_audio_tokens, generate_text_tokens = self.generate(x)
-            real_audio_tokens, real_text_tokens = self.real_tokens(x)
-            
-            loss = F.mse_loss(generatec_audio_tokens, real_audio_tokens) \
-                 + F.mse_loss(generate_text_tokens[:, :min(generate_text_tokens.shape[1], real_text_tokens.shape[1])], 
-                              real_text_tokens[:, :min(generate_text_tokens.shape[1], real_text_tokens.shape[1])])
-            print(f"Pretext Loss: {loss:.6f}")
-            return loss
-        
-        if self.tik_tok:
-            # Discriminator Training
-            self.lora_mode('generator', requires_grad=False)
-            real_audio_tokens, real_text_tokens = self.real_tokens(x)
-            fake_audio_tokens, fake_text_tokens = self.generate(x)
+        audio = x["audio"][:, 0, :]
+        text  = x["text"]
+        target_audio = x["target_audio"][:, 0, :]
+        target_text  = x["target_text"]
 
-            self.lora_mode('discriminator', requires_grad=True)
-            real_audio_pred, real_text_pred = self.discriminate(real_audio_tokens, real_text_tokens)
-            # t_to_a_audio_pred, t_to_a_text_pred = self.discriminate(real_audio_tokens, fake_text_tokens)
-            # a_to_t_audio_pred, a_to_t_text_pred = self.discriminate(fake_audio_tokens, real_text_tokens) 
-            fake_audio_pred, fake_text_pred = self.discriminate(fake_audio_tokens, fake_text_tokens)
-            
-            real_d_loss = - real_audio_pred.log().mean() - real_text_pred.log().mean() # - t_to_a_audio_pred.log().mean() - a_to_t_text_pred.log().mean()
-            fake_d_loss = - (1 - fake_audio_pred).log().mean() - (1 - fake_text_pred).log().mean() # - (1 - a_to_t_audio_pred).log().mean() - (1 - t_to_a_text_pred).log().mean()
-            d_loss = real_d_loss + fake_d_loss 
+        B, L = text.shape
+        step = torch.randint(0, self.num_steps, (B,)).to(text.device)
+        beta = self.betas[step].unsqueeze(-1).unsqueeze(-1)
+        alpha = self.alphas[step].unsqueeze(-1).unsqueeze(-1)
+        alpha_bar = self.alpha_bars[step].unsqueeze(-1).unsqueeze(-1)
 
-            self.real_d_loss = torch.cat((self.real_d_loss, real_d_loss.unsqueeze(0).detach().cpu()))
-            self.fake_d_loss = torch.cat((self.fake_d_loss, fake_d_loss.unsqueeze(0).detach().cpu()))
+        text_sep_pos = (text == 3).nonzero()
 
-            print(f"RA : {real_audio_pred.mean():.6f}, RT : {real_text_pred.mean():.6f}, FA : {fake_audio_pred.mean():.6f}, FT : {fake_text_pred.mean():.6f}", end=' ')
-            print(f"D Loss: {d_loss:.6f}", end=' ')
-            return d_loss
-        else:
-            self.lora_mode('generator', requires_grad=True)
-            # Generator Training
-            real_audio_tokens, real_text_tokens = self.real_tokens(x)
-            fake_audio_tokens, fake_text_tokens = self.generate(x)
+        text = text[:, text_sep_pos[:,1].max()+1:]
+        target_text = target_text[:, 1:2+self.predict_length]
 
-            self.lora_mode('discriminator', requires_grad=False)
-            # _, t_to_a_text_pred = self.discriminate(real_audio_tokens, fake_text_tokens)
-            # a_to_t_audio_pred, _ = self.discriminate(fake_audio_tokens, real_text_tokens)
-            fake_audio_pred, fake_text_pred = self.discriminate(fake_audio_tokens, fake_text_tokens)
+        audio_tokens = self.audio_model.model.feature_extractor(audio)
+        audio_tokens = self.audio_model.model.feature_projection(audio_tokens.transpose(1,2))
+        text_tokens = self.language_model.embeddings(text)
 
-            g_loss = - fake_audio_pred.log().mean() - fake_text_pred.log().mean() + F.mse_loss(real_audio_tokens, fake_audio_tokens) \
-                                                                                  + F.mse_loss(real_text_tokens[:, :min(real_text_tokens.shape[1], fake_text_tokens.shape[1])],
-                                                                                               fake_text_tokens[:, :min(real_text_tokens.shape[1], fake_text_tokens.shape[1])])
-            # - a_to_t_audio_pred.log().mean() - t_to_a_text_pred.log().mean() 
-            self.g_loss = torch.cat((self.g_loss, g_loss.unsqueeze(0).detach().cpu()))
+        target_audio_tokens = self.audio_model.model.feature_extractor(target_audio)
+        target_audio_tokens = self.audio_model.model.feature_projection(target_audio_tokens.transpose(1,2))
+        target_text_tokens = self.language_model.embeddings(target_text)
 
-            decoded_text = self.decode_text(fake_text_tokens)
-            total_text = self.tokenizer.batch_decode(torch.cat((x["text"], x["target_text"]), dim=1), skip_special_tokens=True)
-            print(f"G Loss: {g_loss:.6f}, Text: {total_text[0]} -> {decoded_text[0]}")
-            plt.plot(self.g_loss.numpy(), label='Generator Loss')
-            plt.plot(self.real_d_loss.numpy(), label='Real Discriminator Loss')
-            plt.plot(self.fake_d_loss.numpy(), label='Fake Discriminator Loss')
-            total_data = torch.cat((self.g_loss, self.real_d_loss, self.fake_d_loss))
-            std = total_data.std()
-            mean = total_data.mean()
-            ax = plt.gca()
-            ax.set_ylim([None, mean + std * 3])
-            plt.legend()
-            plt.savefig(f"{self.path}/loss.png")
-            plt.clf()
+        audio_added_noise = torch.randn_like(target_audio_tokens, device=target_audio_tokens.device)
+        text_added_noise = torch.randn_like(target_text_tokens, device=target_text_tokens.device)
 
-            if self.counter % 1000 == 0:
-                decoded_audio = self.decode_audio(fake_audio_tokens, x['audio'].shape[2] + x['target_audio'].shape[2])
-                torchaudio.save(f"{self.path}/audio_{self.counter}.wav", decoded_audio[0:1].detach().cpu(), 16000)
-            return g_loss
+        noise_added_audio = target_audio_tokens * alpha ** 0.5 + audio_added_noise * (1 - alpha) ** 0.5
+        noise_added_text = target_text_tokens * alpha_bar ** 0.5 + text_added_noise * (1 - alpha_bar) ** 0.5
+
+        audio_tokens = torch.cat((audio_tokens, noise_added_audio), dim=1)
+        text_tokens = torch.cat((text_tokens, noise_added_text), dim=1)
+
+        audio_tokens = self.audio_model.model.encoder(audio_tokens).last_hidden_state
+        text_tokens = self.language_model.encoder(text_tokens).last_hidden_state
+
+        audio_tokens = torch.cat((audio_tokens.mean(1, keepdim=True).repeat(1, noise_added_audio.shape[1], 1), noise_added_audio), dim=-1) + self.time_embedding(step)
+        text_tokens = torch.cat((text_tokens[:, :1, :].repeat(1, noise_added_text.shape[1], 1), noise_added_text), dim=-1) + self.time_embedding(step)
+        audio_tokens = self.audio_decoder(audio_tokens.transpose(1,2)).transpose(1,2)
+        text_tokens = self.text_decoder(text_tokens.transpose(1,2)).transpose(1,2)
+
+        loss = F.mse_loss(audio_tokens, noise_added_audio) + F.mse_loss(text_tokens, noise_added_text)
+        return  loss
 
     def generate(self, x : dict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        text = x["text"].clone()
-        text = self.pad_mask_token(text)
-        mask_token_pos = (text == 4).nonzero()
-        text = self.language_model.embeddings(text)
-        text[mask_token_pos[:,0], mask_token_pos[:,1]] = torch.randn(mask_token_pos.shape[0], 768, device=text.device)
+        with torch.no_grad():
+            audio = x["audio"][:, 0, :]
+            text = x["text"]
+            target_audio = x["target_audio"][:, 0, :]
+            target_text = x["target_text"]
 
-        audio = torch.cat((x["audio"][:, 0, :], torch.rand_like(x["target_audio"][:, 0, :], device=x["audio"].device)), dim=1)
-        audio = self.audio_model.model.feature_extractor(audio)
-        audio = self.audio_model.model.feature_projection(audio.transpose(1,2))
+            audio_tokens = self.audio_model.model.feature_extractor(audio)
+            audio_tokens = self.audio_model.model.feature_projection(audio_tokens.transpose(1,2))
+            text_tokens = self.language_model.embeddings(text)
 
-        audio_tokens, text_tokens = self.unified_encoder(audio, text)
-        audio_tokens = self.generator_audio_affine(audio_tokens) + audio
-        text_tokens = self.generator_text_affine(text_tokens) + text
+            target_audio_tokens = self.audio_model.model.feature_extractor(target_audio)
+            target_audio_tokens = self.audio_model.model.feature_projection(target_audio_tokens.transpose(1,2))
+            target_text_tokens = self.language_model.embeddings(target_text)
 
-        return audio_tokens, text_tokens
-    
-    def discriminate(self, audio_tokens : torch.Tensor, text_tokens : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        #74, 788
-        audio_tokens, text_tokens = self.unified_encoder(audio_tokens, text_tokens)
+            audio_start_noise = torch.randn_like(target_audio_tokens, device=target_audio_tokens.device)
+            text_start_noise = torch.randn_like(target_text_tokens, device=text_tokens.device)
+            steps = torch.arange(1, self.num_steps).flip(0).tolist()
+            for step in steps:
+                step = torch.tensor(step).repeat(x["audio"].shape[0]).to(x["audio"].device)
 
-        audio_pred = self.audio_disriminator_head(audio_tokens).mean(dim=1)
-        text_pred = self.text_disriminator_head(text_tokens).mean(dim=1)
+                beta = self.betas[step].unsqueeze(-1).unsqueeze(-1)
+                alpha = self.alphas[step].unsqueeze(-1).unsqueeze(-1)
+                alpha_bar = self.alpha_bars[step].unsqueeze(-1).unsqueeze(-1)
 
-        return audio_pred, text_pred
+                audio_tokens = torch.cat((audio_tokens, audio_start_noise), dim=1)
+                text_tokens = torch.cat((text_tokens, text_start_noise), dim=1)
+
+                audio_tokens = self.audio_model.model.encoder(audio_tokens).last_hidden_state
+                text_tokens = self.language_model.encoder(text_tokens).last_hidden_state
+
+                audio_tokens = torch.cat((audio_tokens.mean(1, keepdim=True).repeat(1, audio_start_noise.shape[1], 1), audio_start_noise), dim=-1) + self.time_embedding(step)
+                text_tokens = torch.cat((text_tokens[:, :1, :].repeat(1, text_start_noise.shape[1], 1), text_start_noise), dim=-1) + self.time_embedding(step)
+                audio_tokens = self.audio_decoder(audio_tokens.transpose(1,2)).transpose(1,2)
+                text_tokens = self.text_decoder(text_tokens.transpose(1,2)).transpose(1,2)
+
+                audio_start_noise = (audio_start_noise - beta / ((1 - alpha_bar)**0.5) * audio_tokens) / alpha ** 0.5
+                text_start_noise = (text_start_noise - beta / ((1 - alpha_bar)**0.5) * text_tokens) / alpha ** 0.5
+                if (step > 0).all():
+                    audio_start_noise += beta ** 0.5 * torch.randn_like(audio_start_noise)
+                    text_start_noise += beta ** 0.5 * torch.randn_like(text_start_noise)
+        return audio_start_noise, text_start_noise
 
     def real_tokens(self, x : dict) -> Tuple[torch.Tensor, torch.Tensor]:
         audio = x["audio"][:, 0, :].clone()
@@ -343,36 +331,30 @@ class Adversarial(nn.Module):
             audio_tokens = a_layer(audio_tokens)[0]
             text_tokens = t_layer(text_tokens)[0]
             if layer in [10,11]:
-                _audio_tokens = self.a2tca[layer](audio_tokens, text_tokens)
-                _text_tokens = self.t2aca[layer](text_tokens, audio_tokens)
+                _audio_tokens = self.audio_to_text_attention[layer](audio_tokens, text_tokens)
+                _text_tokens = self.text_to_audio_attention[layer](text_tokens, audio_tokens)
                 audio_tokens = _audio_tokens
                 text_tokens = _text_tokens
         return audio_tokens, text_tokens
 
     def forward(self, x):
         y = {}
-        self.lora_mode('generator', requires_grad=False)
-        self.generator_text_affine.requires_grad_(False)
-        self.generator_audio_affine.requires_grad_(False)
-        self.generator_audio_to_text_attention.requires_grad_(False)
-        self.generator_text_to_audio_attention.requires_grad_(False)
 
+        text = x["text"]
         audio = x["audio"][:, 0, :]
-        text  = x["text"]
-        B, L = text.shape
 
-        gen_audio, gen_text = self.generate(x)
-        
-        self.lora_mode('classifier', requires_grad=True)
-        audio, text = self.unified_encoder(gen_audio, gen_text)
+        audio = self.audio_model.model.feature_extractor(audio)
+        audio = self.audio_model.model.feature_projection(audio.transpose(1,2))
+        text = self.language_model.embeddings(text)
 
-        AB, AL, _ = audio.shape
-        TB, TL, _ = text.shape
+        generated_audio, generated_text = self.generate(x)
 
-        # if self.mode != "text_only":
-        #     audio = self.audio_model(audio)
-        # if self.mode != "audio_only":
-        #     text, text2 = self.language_model(text)
+        AB = generated_audio.shape[0]
+        TB = generated_text.shape[0]
+
+        text = torch.cat((text, generated_text), dim=1)
+        audio = torch.cat((audio, generated_audio), dim=1)
+        audio, text = self.unified_encoder(generated_audio, generated_text)
 
         if self.mode == "flatten":
             audio = audio.reshape(AB, -1)
