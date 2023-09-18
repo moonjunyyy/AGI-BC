@@ -37,10 +37,8 @@ class time_embedding(nn.Module):
         return embeding.unsqueeze(1)
     
 class Adversarial(nn.Module):
-    def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy", tokenizer=None, path=None):
+    def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy", tokenizer=None):
         super(Adversarial, self).__init__()
-
-        self.path = path
 
         self.mode = mode
         if self.mode != "audio_only":

@@ -105,9 +105,7 @@ class Trainer:
             num_class=self.num_class,
             sentiment_output_size=64,
             dropout=0.3,
-            mode=self.mode,
-            tokenizer=tokenizer,
-            path=self.path)
+            mode=self.mode)
         self.model = self.model.to(self.local_rank)
         self.model_without_ddp = self.model
         if self.distributed:
@@ -155,34 +153,9 @@ class Trainer:
             print(e)
             print('No pretrained model')
             if hasattr(self.model_without_ddp, 'pretext_forward'):
-                for epoch in range(self.pretext_epoch):
-                    optimizer.param_groups[0]['lr'] = 1e-4 * (self.pretext_epoch - epoch) / self.pretext_epoch
-                    self.train_sampler.set_epoch(epoch)
-                    pre_loss = 0
-                    pre_count = 0
-                    for b, batch in enumerate(self.train_dataloader):
-                        pre_count += 1
-                        for key in batch:
-                            batch[key] = batch[key].to(self.local_rank)
-                        # print(f"Epoch : {epoch}, {b+1}/{len(self.train_dataloader)}", end=' ')
-                        loss = self.model_without_ddp.pretext_forward(batch)
-                        pre_loss += loss.item()
-
-                        optimizer.zero_grad()
-                        loss.backward()
-                        optimizer.step()
-                        print(f"Epoch : {epoch}, {b+1}/{len(self.train_dataloader)} Loss : {loss.item():.6f}", end='\r')
-                        if b == 0:
-                            generated_audio, generated_text = self.model_without_ddp.generate(batch)
-                            generated_audio = self.model_without_ddp.decode_audio(generated_audio[:1], 8000)
-                            generated_audio = torch.cat((batch['audio'][0,:1,:], generated_audio), dim=-1)
-                            generated_text = self.model_without_ddp.decode_text(generated_text)
-                            generated_audio = generated_audio.detach().cpu()
-                            print(batch["target_text"], " => " , generated_text[0])
-                            torchaudio.save(f'{self.path}/generated_{epoch}.wav', generated_audio.reshape(1, -1), 16000)
-                    print(f'Epoch : {epoch}, Loss : {pre_loss/pre_count:.6f}', " "*20)
-                    torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
-                    sys.stdout.flush()
+                self.model_without_ddp.pretext_forward(self.train_dataloader)
+                torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
+                sys.stdout.flush()
             else:
                 print('No pretext training')
 

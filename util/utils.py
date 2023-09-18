@@ -21,10 +21,10 @@ def get_language_model(name):
         bert, vocab = get_pytorch_kobert_model()
         tokenizer = KoBERTTokenizer.from_pretrained('skt/kobert-base-v1')
         sentiment_dict = json.load(open('data/SentiWord_info.json', encoding='utf-8-sig', mode='r'))
-    elif name == 'Bert':
-        from transformers import BertModel, AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
+    # elif name == 'Bert':
+        # from transformers import BertModel, AutoTokenizer
+        # tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+        # bert = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False, output_hidden_states=True, output_attentions=False)
     elif name == 'ELECTRA':
         from transformers import AutoTokenizer, AutoModelForPreTraining
         tokenizer = AutoTokenizer.from_pretrained("google/electra-base-discriminator")
