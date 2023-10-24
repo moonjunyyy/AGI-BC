@@ -12,6 +12,7 @@ class Ours(nn.Module):
         super(Ours, self).__init__()
 
         self.mode = mode
+        self.num_classes = num_class
 
         self.register_module("language_model", language_model)
         # if bert and vocab are not provided, raise an error
@@ -23,6 +24,8 @@ class Ours(nn.Module):
         self.register_module("audio_model", audio_model)
         # define the LSTM layer, 4 of layers
         self.audio_feature_size = audio_model.get_feature_size()
+        for p in self.audio_model.parameters():
+            p.requires_grad = False
 
         self.dropout = nn.Dropout(dropout)
         if self.mode == "audio_only" or self.mode == "text_only":
@@ -44,10 +47,11 @@ class Ours(nn.Module):
         N, D = x.shape
         c = x[torch.randperm(x.shape[0])[:k]]
         c = c.unsqueeze(1) # (k, 1, D)
-        x = x.unsqueeze(0) # (1, N, D)
+        x = x # (1, N, D)
         for i in range(max_iter):
-            diff = torch.cdist(c, x, p=2)
-            diff = diff.squeeze(0)
+            # diff = torch.cdist(c, x, p=2)
+            diff = 1 - torch.cosine_similarity(c, x, dim=2)
+            diff = diff.squeeze()
             _, cluster = torch.min(diff, dim=0)
             for j in range(k):
                 c[j] = x[cluster==j].mean(dim=0).unsqueeze(0)
@@ -57,6 +61,9 @@ class Ours(nn.Module):
         with torch.no_grad():
             self.audios = []
             self.target_audios = []
+            self.texts = []
+            self.target_texts = []
+            self.labels = []
             for x in dataloader:
                 audio = x["audio"]
                 target_audio = x["target_audio"]
@@ -68,9 +75,6 @@ class Ours(nn.Module):
                 audio = audio[:, 0, :]
                 audio = self.audio_model.model.feature_extractor(audio)
                 audio = self.audio_model.model.feature_projection(audio.transpose(1, 2))
-                audio = self.audio_model.model.encoder.pos_conv_embed(audio)
-                audio = self.audio_model.model.encoder.layer_norm(audio)
-                audio = self.audio_model.model.encoder.dropout(audio)
                 audio = self.audio_model.model.encoder(audio)[0]
                 audio = audio.mean(dim=1)
                 self.audios.append(audio)
@@ -83,19 +87,65 @@ class Ours(nn.Module):
                 target_audio = self.audio_model.model.encoder.dropout(target_audio)
                 self.target_audios.append(target_audio)
 
+                text = x["text"]
+                target_text = x["target_text"]
+
+                device = self.parameters().__next__().device
+                text = text.to(device)
+                target_text = target_text.to(device)
+
+                text = self.language_model.embeddings(text)
+                text = self.language_model.encoder(text)[0]
+                text = text[:, 0, :]
+                self.texts.append(text)
+                
+                target_text = self.language_model.embeddings(target_text)
+                self.target_texts.append(target_text)
+
+                self.labels.append(x["label"])
+
             self.audios = torch.cat(self.audios, dim=0)
             self.target_audios = torch.cat(self.target_audios, dim=0)
-            self.centriods, self.cluster = self.k_means(self.audios, 128)
+            self.texts = torch.cat(self.texts, dim=0)
+            self.target_texts = torch.cat(self.target_texts, dim=0)
+            self.labels = torch.cat(self.labels, dim=0)
+            # make a prototype for each cluster of audio
+            self.audio_centroids = []
+            self.audio_target_centriods = []
+            self.audio_text_target_centriods = []
+            for c in range(self.num_classes):
+                centroids, cluster = self.k_means(self.audios[self.labels==c], 10)
+                self.audio_centroids.append(centroids)
+                for i, _ in enumerate(centroids):
+                    self.audio_target_centriods.append(self.target_audios[self.labels==c][cluster==i].mean(dim=0))
+                    self.audio_text_target_centriods.append(self.target_texts[self.labels==c][cluster==i].mean(dim=0))
+            # self.centriods, self.cluster = self.k_means(self.audios, 10)
             # make a prototype for each cluster of target audio
-            self.target_centriods = []
-            for i, _ in enumerate(self.centriods):
-                self.target_centriods.append(self.target_audios[self.cluster==i].mean(dim=0))
-            self.target_centriods = torch.stack(self.target_centriods, dim=0)
+            self.audio_centroids = torch.cat(self.audio_centroids, dim=0)
+            self.audio_target_centriods = torch.stack(self.audio_target_centriods, dim=0)
+            self.audio_text_target_centriods = torch.stack(self.audio_text_target_centriods, dim=0)
+
+            self.text_centroids = []
+            self.text_target_centriods = []
+            self.text_audio_target_centriods = []
+            for c in range(self.num_classes):
+                centroids, cluster = self.k_means(self.texts[self.labels==c], 10)
+                self.text_centroids.append(centroids)
+                for i, _ in enumerate(centroids):
+                    self.text_target_centriods.append(self.target_texts[self.labels==c][cluster==i].mean(dim=0))
+                    self.text_audio_target_centriods.append(self.target_audios[self.labels==c][cluster==i].mean(dim=0))
+
+            self.text_centroids = torch.cat(self.text_centroids, dim=0)
+            self.text_target_centriods = torch.stack(self.text_target_centriods, dim=0)
+            self.text_audio_target_centriods = torch.stack(self.text_audio_target_centriods, dim=0)
+
+            print(self.audio_centroids.shape)
+            print(self.audio_target_centriods.shape)
 
     def forward(self, x):
         y = {}
 
-        audio = x["audio"]
+        audio = torch.cat((x["audio"], x["target_audio"]), dim=2)
         text  = x["text"]
 
         # get audio only one channel
@@ -113,15 +163,30 @@ class Ours(nn.Module):
         audio = self.audio_model.model.encoder.layer_norm(audio)
         audio = self.audio_model.model.encoder.dropout(audio)
 
-        _audio = self.audio_model.model.encoder(audio)[0]
+        _audio = audio.clone()
+        for l, layer in enumerate(self.audio_model.model.encoder.layers):
+            _audio = layer(_audio)[0]
         _audio = _audio.mean(dim=1)
-        similarty = torch.cdist(_audio, self.centriods.to(_audio.device), p=2)
-        _, cluster = torch.min(similarty, dim=1)
-        target_audio = self.target_centriods.to(_audio.device)[cluster]
-        audio = torch.cat((audio, target_audio), dim=1)
 
-        audio = self.audio_model.model.encoder(audio)[0]
+        # similarty = torch.cdist(_audio, self.centriods.to(_audio.device), p=2)
+        similarty = 1 - torch.cosine_similarity(_audio.unsqueeze(1), self.audio_centroids.to(_audio.device).unsqueeze(0), dim=2)
+        _, cluster = torch.min(similarty, dim=1)
+        target_audio = self.audio_target_centriods.to(_audio.device)[cluster]
+        target_audio_text = self.audio_text_target_centriods.to(_audio.device)[cluster]
+
         text = self.language_model.embeddings(text)
+        _text = text.clone()
+        _text = self.language_model.encoder(_text)[0]
+        _text = _text[:, 0, :]
+        similarty = 1 - torch.cosine_similarity(_text.unsqueeze(1), self.text_centroids.to(_text.device).unsqueeze(0), dim=2)
+        _, cluster = torch.min(similarty, dim=1)
+        target_text = self.text_target_centriods.to(_text.device)[cluster]
+        target_text_audio = self.text_audio_target_centriods.to(_text.device)[cluster]
+
+        audio = torch.cat((audio, (target_audio + target_text_audio)/2), dim=1)
+        audio = self.audio_model.model.encoder(audio)[0]
+
+        text = torch.cat((text, (target_text + target_audio_text)/2), dim=1)
         text = self.language_model.encoder(text)[0]
 
         audio = audio.reshape(AB, -1, 768).mean(dim=1)
@@ -134,7 +199,6 @@ class Ours(nn.Module):
         y["logit"] = self.fc_layer_1(self.dropout(concat))
         y["logit"] = self.relu(y["logit"])
         y["logit"] = self.classifier(self.dropout(y["logit"]))
-
         # y["sentiment"] = self.sentiment_classifier(self.dropout(self.sentiment_relu(self.sentiment_fc_layer_1(self.dropout(text)))))
-        
+
         return y

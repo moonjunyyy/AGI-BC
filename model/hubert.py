@@ -8,7 +8,9 @@ class HuBert(nn.Module):
     def __init__(self, sample_rate) -> None:
         super().__init__()
         # self.processor = AutoProcessor.from_pretrained("facebook/hubert-base-ls960")
+        # self.processor = Wav2Vec2FeatureExtractor.from_pretrained("team-lucid/hubert-base-korean") 
         self.processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960") 
+        # self.model = AutoModel.from_pretrained("team-lucid/hubert-base-korean")
         self.model = AutoModel.from_pretrained("facebook/hubert-base-ls960")
         self.sample_rate = sample_rate
 

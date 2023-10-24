@@ -4,6 +4,8 @@ import sys
 import time
 import random
 import torch
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -17,7 +19,6 @@ from util.utils import get_dataset, get_audio_model,\
      get_language_model, get_backchannel_prediction_model
 from util.criterions import get_criterion
 from util.koalpaca import KoAlpaca
-
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 class Trainer:
@@ -117,6 +118,27 @@ class Trainer:
         discriminator_params = []
         prompt_params = []
 
+        # self.model.eval()
+        # audio_features = []
+        # labels = []
+        # with torch.no_grad():
+        #     for i, batch in enumerate(self.train_dataloader):
+        #         for key in batch:
+        #             batch[key] = batch[key].to(self.local_rank)
+        #         audio_features.append(self.model.audio_model(batch["target_audio"]).detach().cpu())
+        #         labels.append(batch["label"].detach().cpu())
+        #     audio_features = torch.cat(audio_features, dim=0)
+        #     labels = torch.cat(labels, dim=0)
+        # audio_features = audio_features.reshape(audio_features.shape[0], -1)
+        # audio_features = audio_features / audio_features.norm(dim=1, keepdim=True)
+        # audio_features = audio_features.detach().cpu().numpy()
+        # audio_features = TSNE(n_components=2).fit_transform(audio_features)
+        # for i in range(self.num_class):
+        #     plt.scatter(audio_features[labels == i, 0], audio_features[labels == i, 1], label=i, s=1)
+        # plt.savefig(f'audio_features.png')
+        # plt.clf()
+        # exit()
+        
         # for name, param in self.model.named_parameters():
         #     if 'language_model' in name or 'audio_model' in name:
         #         bert_params.append(param)

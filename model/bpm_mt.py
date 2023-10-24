@@ -13,6 +13,8 @@ class BPM_ST(nn.Module):
             assert self.language_model is not None, "bert must be provided"
         if self.mode != "text_only":
             self.register_module("audio_model", audio_model)
+            for param in self.audio_model.parameters():
+                param.requires_grad = False
             # define the LSTM layer, 4 of layers
             self.audio_feature_size = audio_model.get_feature_size()
             assert self.audio_model is not None, "audio_model must be provided"
