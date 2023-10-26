@@ -27,6 +27,8 @@ class Ours(nn.Module):
         for p in self.audio_model.parameters():
             p.requires_grad = False
 
+        self.cross_attention_layer = nn.ModuleList([CrossAttentionLayer(768, 4, 0.5) for _ in range(12)])
+
         self.dropout = nn.Dropout(dropout)
         if self.mode == "audio_only" or self.mode == "text_only":
             self.fc_layer_1 = nn.Linear(768, output_size)
@@ -113,12 +115,11 @@ class Ours(nn.Module):
             self.audio_centroids = []
             self.audio_target_centriods = []
             self.audio_text_target_centriods = []
-            for c in range(self.num_classes):
-                centroids, cluster = self.k_means(self.audios[self.labels==c], 10)
-                self.audio_centroids.append(centroids)
-                for i, _ in enumerate(centroids):
-                    self.audio_target_centriods.append(self.target_audios[self.labels==c][cluster==i].mean(dim=0))
-                    self.audio_text_target_centriods.append(self.target_texts[self.labels==c][cluster==i].mean(dim=0))
+            centroids, cluster = self.k_means(self.audios, 10)
+            self.audio_centroids.append(centroids)
+            for i, _ in enumerate(centroids):
+                self.audio_target_centriods.append(self.target_audios[cluster==i].mean(dim=0))
+                self.audio_text_target_centriods.append(self.target_texts[cluster==i].mean(dim=0))
             # self.centriods, self.cluster = self.k_means(self.audios, 10)
             # make a prototype for each cluster of target audio
             self.audio_centroids = torch.cat(self.audio_centroids, dim=0)
@@ -128,12 +129,11 @@ class Ours(nn.Module):
             self.text_centroids = []
             self.text_target_centriods = []
             self.text_audio_target_centriods = []
-            for c in range(self.num_classes):
-                centroids, cluster = self.k_means(self.texts[self.labels==c], 10)
-                self.text_centroids.append(centroids)
-                for i, _ in enumerate(centroids):
-                    self.text_target_centriods.append(self.target_texts[self.labels==c][cluster==i].mean(dim=0))
-                    self.text_audio_target_centriods.append(self.target_audios[self.labels==c][cluster==i].mean(dim=0))
+            centroids, cluster = self.k_means(self.texts, 10)
+            self.text_centroids.append(centroids)
+            for i, _ in enumerate(centroids):
+                self.text_target_centriods.append(self.target_texts[cluster==i].mean(dim=0))
+                self.text_audio_target_centriods.append(self.target_audios[cluster==i].mean(dim=0))
 
             self.text_centroids = torch.cat(self.text_centroids, dim=0)
             self.text_target_centriods = torch.stack(self.text_target_centriods, dim=0)
@@ -145,7 +145,7 @@ class Ours(nn.Module):
     def forward(self, x):
         y = {}
 
-        audio = torch.cat((x["audio"], x["target_audio"]), dim=2)
+        audio = x["audio"]
         text  = x["text"]
 
         # get audio only one channel
@@ -183,11 +183,17 @@ class Ours(nn.Module):
         target_text = self.text_target_centriods.to(_text.device)[cluster]
         target_text_audio = self.text_audio_target_centriods.to(_text.device)[cluster]
 
-        audio = torch.cat((audio, (target_audio + target_text_audio)/2), dim=1)
-        audio = self.audio_model.model.encoder(audio)[0]
+        audio = torch.cat((audio, target_audio), dim=1)
+        text = torch.cat((text, target_text), dim=1)
 
-        text = torch.cat((text, (target_text + target_audio_text)/2), dim=1)
-        text = self.language_model.encoder(text)[0]
+        for l, (a_layer, t_layer) in enumerate(zip(self.audio_model.model.encoder.layers, self.language_model.encoder.layer)):
+            audio = a_layer(audio)[0]
+            text = t_layer(text)[0]
+            if l > 8:
+                _audio = self.cross_attention_layer[l](audio, text)
+                _text = self.cross_attention_layer[l](text, audio)
+            audio = _audio
+            text = _text
 
         audio = audio.reshape(AB, -1, 768).mean(dim=1)
         text = text.reshape(TB, -1, 768)[:, 0, :]

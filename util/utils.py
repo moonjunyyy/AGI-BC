@@ -36,7 +36,7 @@ def get_language_model(name):
 def get_dataset(name, tokenizer):
     from torch.utils.data import Subset
     from dataset.SWBD_Dataset import SWBD_Dataset
-    from dataset.ETRI_Dataset import ETRI_Corpus_Dataset, ETRI_Generation_Dataset
+    from dataset.ETRI_Dataset import ETRI_Corpus_Dataset, ETRI_Generation_Dataset, ETRI_2022_Dataset, ETRI_2023_Dataset, ETRI_All_Dataset, ETRI_ALL_Client_Dataset
     if name == 'SWBD':
         dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, length=1.5)
         train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
@@ -49,6 +49,22 @@ def get_dataset(name, tokenizer):
     elif name == 'ETRI_GEN':
         train_dataset = ETRI_Generation_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
         val_dataset = ETRI_Generation_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
+    elif name == 'ETRI_2022':
+        train_dataset = ETRI_2022_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_2022_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
+    elif name == 'ETRI_2023':
+        train_dataset = ETRI_2023_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_2023_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
+    elif name == 'ETRI_ALL':
+        train_dataset = ETRI_All_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_All_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
+    elif name == 'ETRI_Client':
+        train_dataset = ETRI_ALL_Client_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_ALL_Client_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
         num_class = 4
     else:
         NotImplementedError

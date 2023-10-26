@@ -99,6 +99,10 @@ class Trainer:
         self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
         
+        if self.model == 'BPM_MT':
+            self.is_MT = True
+        else:
+            self.is_MT = False
         self.model = get_backchannel_prediction_model(self.model)(
             language_model=language_model,
             audio_model=audio_model,
@@ -186,10 +190,6 @@ class Trainer:
             self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.pretext_epoch)
             self.model.train()
 
-            self.model.fc_layer_1 = nn.Linear(768*2, 128).to(self.local_rank)
-            self.model.dropout = nn.Dropout(0.3).to(self.local_rank)
-            self.model.classifier = nn.Linear(128, self.num_class).to(self.local_rank)
-
             for b, batch in enumerate(self.train_dataloader):
                 
                 # Move the batch to GPU if CUDA is available
@@ -200,8 +200,8 @@ class Trainer:
                 loss, logit = self.criteria(batch, y)
                 loss = loss.mean()
 
-                if self.model == 'BPM_MT':
-                    loss += F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
+                if self.is_MT:
+                    loss = 0.9 * loss + 0.1 * F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
 
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
 
@@ -226,6 +226,9 @@ class Trainer:
                 fp = torch.tensor([0 for _ in range(self.num_class)],device=self.local_rank)
                 fn = torch.tensor([0 for _ in range(self.num_class)],device=self.local_rank)
                 tn = torch.tensor([0 for _ in range(self.num_class)],device=self.local_rank)
+
+                label = []
+                pred = []
 
                 for batch in self.val_dataloader:
                     # Move the batch to GPU if CUDA is available
@@ -255,7 +258,16 @@ class Trainer:
                                 else:
                                     tn[l] += 1
 
+                    label.append(batch["label"])
+                    pred.append(logit.argmax(dim=-1))
+
+                label = torch.cat(label, dim=0)
+                pred = torch.cat(pred, dim=0)
+
                 if self.distributed:
+                    label = label.to(self.local_rank)
+                    pred = pred.to(self.local_rank)
+
                     accuracy = accuracy.to(self.local_rank)
                     loss = loss.to(self.local_rank)
                     tp = tp.to(self.local_rank)
@@ -263,6 +275,8 @@ class Trainer:
                     fn = fn.to(self.local_rank)
                     tn = tn.to(self.local_rank)
 
+                    label = self.all_gather(label)
+                    pred = self.all_gather(pred)
                     dist.all_reduce(accuracy, op=dist.ReduceOp.SUM)
                     dist.all_reduce(loss, op=dist.ReduceOp.SUM)
                     dist.all_reduce(tp, op=dist.ReduceOp.SUM)
@@ -270,6 +284,11 @@ class Trainer:
                     dist.all_reduce(fn, op=dist.ReduceOp.SUM)
                     dist.all_reduce(tn, op=dist.ReduceOp.SUM)
 
+                    label = torch.cat(label, dim=0)
+                    pred = torch.cat(pred, dim=0)
+
+                    label = label.cpu()
+                    pred = pred.cpu()
                     accuracy = accuracy.cpu()
                     loss     = loss.cpu()
                     tp = tp.cpu()
@@ -286,6 +305,14 @@ class Trainer:
                 number_of_classes = self.val_dataset.get_sample_in_class()
                 weighted_f1_score = (f1_score * number_of_classes).sum() / number_of_classes.sum()
                 print(f"Epoch : {epoch}, Loss : {loss.item():.6f}, Acc : {accuracy.item()*100:.3f}, F1 : {weighted_f1_score.item()*100:.3f}, {f1_score.tolist()}")
+
+                # Print a confusion matrix
+                for a in range(self.num_class):
+                    for p in range(self.num_class):
+                        a = label == a
+                        p = pred == p
+                        print(f"{(a & p).sum().item():5d}", end=' ')
+                    print()
                 sys.stdout.flush()
             gc.collect()
         
@@ -327,7 +354,32 @@ class Trainer:
             return dist.get_rank()
         return 0
     
-    def get_world_size(self):
-        if self.distributed:
-            return dist.get_world_size()
-        return 1
+    def all_gather(self, item):
+        local_size = torch.tensor(item.size(0), device=self.device)
+        all_sizes = [torch.zeros_like(local_size) for _ in range(dist.get_world_size())]
+        for i in range(dist.get_world_size()):
+            if i == dist.get_rank():
+                dist.gather(local_size, all_sizes, dst=i)
+            else:
+                dist.gather(local_size, dst=i)
+        # dist.all_gather(all_sizes, local_size, async_op=False)
+        max_size = max(all_sizes)
+
+        size_diff = max_size.item() - local_size.item()
+        if size_diff:
+            padding = torch.zeros(size_diff, device=self.device, dtype=item.dtype)
+            item = torch.cat((item, padding))
+
+        all_qs_padded = [torch.zeros_like(item) for _ in range(dist.get_world_size())]
+
+        for i in range(dist.get_world_size()):
+            if i == dist.get_rank():
+                dist.gather(item, all_qs_padded, dst=i)
+            else:
+                dist.gather(item, dst=i)
+
+        # dist.all_gather(all_qs_padded, item)
+        all_qs = []
+        for q, size in zip(all_qs_padded, all_sizes):
+            all_qs.append(q[:size])
+        return all_qs

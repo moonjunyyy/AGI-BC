@@ -21,7 +21,9 @@ class BPM_ST(nn.Module):
 
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
-        if self.mode == "audio_only" or self.mode == "text_only":
+        if self.mode == "audio_only":
+            self.fc_layer_1 = nn.Linear(self.audio_feature_size, output_size) 
+        elif self.mode == "text_only":
             self.fc_layer_1 = nn.Linear(768, output_size)
         elif self.mode == "flatten":
             self.fc_layer_1 = nn.Linear(sum(self._get_feature_size()), output_size)
@@ -97,7 +99,9 @@ class BPM_MT(nn.Module):
 
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
-        if self.mode == "audio_only" or self.mode == "text_only":
+        if self.mode == "audio_only":
+            self.fc_layer_1 = nn.Linear(self.audio_feature_size, output_size) 
+        elif self.mode == "text_only":
             self.fc_layer_1 = nn.Linear(768, output_size)
         elif self.mode == "flatten":
             self.fc_layer_1 = nn.Linear(sum(self._get_feature_size()), output_size)
@@ -139,6 +143,8 @@ class BPM_MT(nn.Module):
         elif self.mode == "text_only":
             concat = text[:, 0, :]
         else:
+            audio = audio[:, -1]
+            text = text[:, 0, :]
             concat = torch.cat((audio, text), dim=1)
 
         x = self.fc_layer_1(self.dropout(concat))
