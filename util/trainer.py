@@ -149,7 +149,7 @@ class Trainer:
         #     elif 'prompt' in name:
         #         prompt_params.append(param)
         #     else:
-        #         other_params.append(param)
+        #         other_params.append(param) 
 
         # adam_optimizer = torch.optim.Adam(other_params, lr=1e-4, weight_decay=self.weight_decay)
         # sgd_optimizer = torch.optim.SGD(bert_params, lr=1e-4)
@@ -185,7 +185,7 @@ class Trainer:
             else:
                 print('No pretext training')
 
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
         for epoch in range(self.epochs):
             self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.pretext_epoch)
             self.model.train()

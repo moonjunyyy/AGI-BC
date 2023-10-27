@@ -27,7 +27,8 @@ class Ours(nn.Module):
         for p in self.audio_model.parameters():
             p.requires_grad = False
 
-        self.cross_attention_layer = nn.ModuleList([CrossAttentionLayer(768, 4, 0.5) for _ in range(12)])
+        self.audio_to_text_layer = nn.ModuleList([CrossAttentionLayer(768, 8, 0.5) for _ in range(12)])
+        self.text_to_audio_layer = nn.ModuleList([CrossAttentionLayer(768, 8, 0.5) for _ in range(12)])
 
         self.dropout = nn.Dropout(dropout)
         if self.mode == "audio_only" or self.mode == "text_only":
@@ -187,11 +188,11 @@ class Ours(nn.Module):
         text = torch.cat((text, target_text), dim=1)
 
         for l, (a_layer, t_layer) in enumerate(zip(self.audio_model.model.encoder.layers, self.language_model.encoder.layer)):
-            audio = a_layer(audio)[0]
-            text = t_layer(text)[0]
+            audio = a_layer(audio)
+            text = t_layer(text)
             if l > 8:
-                _audio = self.cross_attention_layer[l](audio, text)
-                _text = self.cross_attention_layer[l](text, audio)
+                _audio = self.audio_to_text_layer[l](audio, text)
+                _text = self.text_to_audio_layer[l](text, audio)
             audio = _audio
             text = _text
 
