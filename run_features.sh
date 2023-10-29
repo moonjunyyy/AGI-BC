@@ -41,7 +41,7 @@ do
     python feature_tsne.py \
     --mode None \
     --seed ${seeds[$i]} \
-    --batch_size 64 \
+    --batch_size 16 \
     --num_workers 8 \
     --epochs 200 \
     --language koBert \
