@@ -200,6 +200,9 @@ class Trainer:
                 loss, logit = self.criteria(batch, y)
                 loss = loss.mean()
 
+                if 'consistency_loss' in y.keys():
+                    loss = loss + 0.1 * y['consistency_loss'].mean()
+
                 if self.is_MT:
                     loss = 0.9 * loss + 0.1 * F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
 
