@@ -45,7 +45,7 @@ do
     --mode ${mode} \
     --dataset ${dataset} \
     --seed ${seeds[$i]} \
-    --batch_size 16 \
+    --batch_size 32 \
     --num_workers 8 \
     --epochs 100 \
     --language koBert \

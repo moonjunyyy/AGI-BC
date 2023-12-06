@@ -156,7 +156,7 @@ class Trainer:
         # if prompt_params != []:
         #     adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0001, 'weight_decay': self.weight_decay})
         # optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
 
         # generator_params = []
         # discriminator_params = []
