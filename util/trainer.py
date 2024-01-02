@@ -98,7 +98,7 @@ class Trainer:
         self.val_sampler = torch.utils.data.distributed.DistributedSampler(self.val_dataset, shuffle=False, num_replicas=self.world_size, rank=self.rank)
         self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
         self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
-        
+
         if self.model == 'BPM_MT':
             self.is_MT = True
         else:
@@ -143,6 +143,8 @@ class Trainer:
         # plt.clf()
         # exit()
         
+        # bert_params = []
+        # other_params = []
         # for name, param in self.model.named_parameters():
         #     if 'language_model' in name or 'audio_model' in name:
         #         bert_params.append(param)
@@ -151,12 +153,14 @@ class Trainer:
         #     else:
         #         other_params.append(param)
 
-        # adam_optimizer = torch.optim.Adam(other_params, lr=1e-4, weight_decay=self.weight_decay)
-        # sgd_optimizer = torch.optim.SGD(bert_params, lr=1e-4)
+        # adam_optimizer = torch.optim.Adam(other_params, lr=5e-4, weight_decay=self.weight_decay)
+        # sgd_optimizer = torch.optim.SGD(bert_params, lr=5e-4)
         # if prompt_params != []:
         #     adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0001, 'weight_decay': self.weight_decay})
         # optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
+        # optimizer = torch.optim.Adam(self.bert_params.parameters(), lr=2e-6, weight_decay=self.weight_decay)
+        # optimizer.add_param_group({'params': self.other_params.parameters(), 'lr': 1e-4, 'weight_decay': self.weight_decay})
+        # optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
 
         # generator_params = []
         # discriminator_params = []
@@ -184,12 +188,26 @@ class Trainer:
                 sys.stdout.flush()
             else:
                 print('No pretext training')
-
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
+        # import matplotlib.pyplot as plt
+        bert_params = []
+        other_params = []
+        for name, param in self.model.named_parameters():
+            if 'language_model' in name or 'audio_model' in name:
+                bert_params.append(param)
+            elif 'prompt' in name:
+                prompt_params.append(param)
+            else:
+                other_params.append(param)
+        optimizer = torch.optim.Adam(other_params, lr=1e-4, weight_decay=self.weight_decay)
+        optimizer.add_param_group({'params': bert_params, 'lr': 1e-4})
+        # optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
         for epoch in range(self.epochs):
             self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.pretext_epoch)
             self.model.train()
 
+            train_acc = 0
+            train_loss = 0
+            count = 0
             for b, batch in enumerate(self.train_dataloader):
                 
                 # Move the batch to GPU if CUDA is available
@@ -207,19 +225,33 @@ class Trainer:
                     loss = 0.9 * loss + 0.1 * F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
 
                 accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
+                
+                train_acc += accuracy.item() * len(batch["label"])
+                train_loss += loss.item() * len(batch["label"])
+                count += len(batch["label"])
 
                 # Zero the gradients
                 optimizer.zero_grad()
+                # sgd_optimizer.zero_grad()
+                # adam_optimizer.zero_grad()
                 # Backpropagation
                 loss.backward()
+                # max_grad_ = 0
+                # for name, param in self.model.named_parameters():
+                #     if param.grad is not None:
+                #         max_grad_ = max(max_grad_, param.grad.abs().max().item())
+                # print(max_grad_)
                 # Update the model parameters
                 optimizer.step()
+                # sgd_optimizer.step()
+                # adam_optimizer.step()
 
                 if self.verbose:
                     print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
                 l, c = logit.argmax(dim=-1).unique(return_counts=True)
                 gc.collect()
-
+            train_acc /= count
+            train_loss /= count
             self.model.eval()
             with torch.no_grad():
 
@@ -307,7 +339,7 @@ class Trainer:
                 f1_score = f1_score.nan_to_num(0).detach().cpu()
                 number_of_classes = self.val_dataset.get_sample_in_class()
                 weighted_f1_score = (f1_score * number_of_classes).sum() / number_of_classes.sum()
-                print(f"Epoch : {epoch}, Loss : {loss.item():.6f}, Acc : {accuracy.item()*100:.3f}, F1 : {weighted_f1_score.item()*100:.3f}, {f1_score.tolist()}")
+                print(f"Epoch : {epoch}, Loss : {loss.item():.6f}, Train Loss : {train_loss:.6f}, Train Acc : {train_acc*100:.3f},\nAcc : {accuracy.item()*100:.3f}, Loss : {loss.item():.6f}, Weighted F1 : {weighted_f1_score.item()*100:.3f}, F1 : ", *(f1_score*100).cpu().tolist()) 
 
                 # Print a confusion matrix
                 for a in range(self.num_class):

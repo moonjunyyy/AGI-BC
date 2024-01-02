@@ -240,71 +240,60 @@ class ETRI_2022_Dataset(Dataset):
         if self.balanced and not self.train:
             logging.warning("The balance is only for training dataset")
 
-        self.input_dataframe = pd.read_csv(os.path.join(self.path, "etri2022_2s.tsv"), sep='\t', index_col=0)
-        self.input_dataframe = self.input_dataframe.assign(filename=range(len(self.input_dataframe)))
-        self.target_dataframe = pd.read_csv(os.path.join(self.path, "etri2022_2s.tsv"), sep='\t', index_col=0)
-        self.target_dataframe = self.target_dataframe.assign(filename=range(len(self.target_dataframe)))
+        self.dataframe = pd.read_csv(os.path.join(self.path, "etri2022_2s.tsv"), sep='\t', index_col=0)
+        self.dataframe = self.dataframe.assign(filename=range(len(self.dataframe)))
         
-        assert len(self.input_dataframe) == len(self.target_dataframe)
+        assert len(self.dataframe) == len(self.dataframe)
 
         generator = torch.Generator()
         generator.manual_seed(42)
-        train_index = self.input_dataframe['folder'].unique()
+        train_index = self.dataframe['folder'].unique()
         index = torch.randperm(len(train_index), generator=generator)
         train_index = train_index[index[:int(len(index)*0.8)]]
-        test_index = self.input_dataframe['folder'].unique()
+        test_index = self.dataframe['folder'].unique()
         test_index = test_index[index[int(len(index)*0.8):]]
 
         if self.train:
-            self.input_dataframe = self.input_dataframe[self.input_dataframe['folder'].isin(train_index)]
-            self.target_dataframe = self.target_dataframe[self.target_dataframe['folder'].isin(train_index)]
+            self.dataframe = self.dataframe[self.dataframe['folder'].isin(train_index)]
             if self.balanced:
-                _no_bc_input_dataframe = self.input_dataframe[self.input_dataframe['BC'] == 0]
-                _bc_input_dataframe = self.input_dataframe[self.input_dataframe['BC'] != 0]
-                _no_bc_target_dataframe = self.target_dataframe[self.target_dataframe['BC'] == 0]
-                _bc_target_dataframe = self.target_dataframe[self.target_dataframe['BC'] != 0]
-                if len(_no_bc_input_dataframe) > len(_bc_input_dataframe):
-                    _no_bc_input_dataframe = _no_bc_input_dataframe.sample(len(_bc_input_dataframe), random_state=42)
-                    _no_bc_target_dataframe = _no_bc_target_dataframe.sample(len(_bc_target_dataframe), random_state=42)
+                _no_bc_dataframe = self.dataframe[self.dataframe['BC'] == 0]
+                _bc_dataframe = self.dataframe[self.dataframe['BC'] != 0]
+                if len(_no_bc_dataframe) > len(_bc_dataframe):
+                    _no_bc_dataframe = _no_bc_dataframe.sample(len(_bc_dataframe), random_state=42)
                 else:
-                    _bc_input_dataframe = _bc_input_dataframe.sample(len(_no_bc_input_dataframe), random_state=42)
-                    _bc_target_dataframe = _bc_target_dataframe.sample(len(_no_bc_target_dataframe), random_state=42)
-            self.input_dataframe = pd.concat([_no_bc_input_dataframe, _bc_input_dataframe])
-            self.target_dataframe = pd.concat([_no_bc_target_dataframe, _bc_target_dataframe])
+                    _bc_dataframe = _bc_dataframe.sample(len(_no_bc_dataframe), random_state=42)
+            self.dataframe = pd.concat([_no_bc_dataframe, _bc_dataframe])
         else:
-            self.input_dataframe = self.input_dataframe[self.input_dataframe['folder'].isin(test_index)]
-            self.target_dataframe = self.target_dataframe[self.target_dataframe['folder'].isin(test_index)]
+            self.dataframe = self.dataframe[self.dataframe['folder'].isin(test_index)]
 
         # self.input_dataframe = self.input_dataframe[self.input_dataframe['BC'] > 1]
         # self.target_dataframe = self.target_dataframe[self.target_dataframe['BC'] > 1]
-        print(self.input_dataframe)
-        print(self.input_dataframe['BC'].value_counts().sort_index())
+        print(self.dataframe)
+        print(self.dataframe['BC'].value_counts().sort_index())
 
     def __len__(self):
-        return len(self.input_dataframe)
+        return len(self.dataframe)
     
     def __getitem__(self, index):
 
         ret = {}
 
-        input_item = self.input_dataframe.iloc[index]
-        target_item = self.target_dataframe.iloc[index]
+        item = self.dataframe.iloc[index]
 
-        input_idx = input_item['filename']
-        target_idx = target_item['filename']
+        idx = item['filename']
 
-        trans = input_item['transcript']
-        target_trans = target_item['transcript']
-        lable = input_item['BC']
+        trans = item['transcript']
+        target_trans = item['back']
+        label = item['BC']
 
-        input_path = os.path.join(self.path, "audio", "front", f"{str(input_idx)}.wav")
-        target_path = os.path.join(self.path, "audio", "back", f"{str(target_idx)}.wav")
+        input_path = os.path.join(self.path, "audio", "front", f"{str(idx)}.wav")
+        target_path = os.path.join(self.path, "audio", "back", f"{str(idx)}.wav")
 
         input_audio, sr = torchaudio.load(input_path)
         input_audio = torchaudio.transforms.Resample(sr, 16000)(input_audio)
         sr = 16000
         input_audio = input_audio[:, -int(self.length*sr):]
-        if input_audio.size(1) != int(self.length * 1.5):
+        if input_audio.size(1) != int(self.length * sr):
             input_audio = F.pad(input_audio, (0, int(sr * self.length) - input_audio.size(1)), "constant", 0)
         if input_audio.size(0) != 1:
             input_audio = input_audio.sum(0, keepdim=True)
@@ -312,12 +301,12 @@ class ETRI_2022_Dataset(Dataset):
         target_audio, sr = torchaudio.load(target_path)
         target_audio = torchaudio.transforms.Resample(sr, 16000)(target_audio)
         sr = 16000
-        target_audio = target_audio[:, -int(self.predict_length*sr):]
-        if target_audio.size(1) != int(self.predict_length * 1.5):
+        target_audio = target_audio[:, :int(self.predict_length*sr)]
+        if target_audio.size(1) != int(self.predict_length * sr):
             target_audio = F.pad(target_audio, (0, int(sr * self.predict_length) - target_audio.size(1)), "constant", 0)
         if target_audio.size(0) != 1:
             target_audio = target_audio.sum(0, keepdim=True)
-            
+
         sentiment = torch.zeros(5)
         for word in trans.split():
             r_word, s_word = KnuSL.data_list(word)
@@ -329,18 +318,18 @@ class ETRI_2022_Dataset(Dataset):
         
         trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 
-        target_trans = self.tokenizer(target_trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+        target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 
         ret['audio'] = input_audio
         ret['target_audio'] = target_audio
-        ret['label'] = lable
+        ret['label'] = label
         ret['text'] = trans
         ret['target_text'] = target_trans
         ret['sentiment'] = sentiment
         return ret
     
     def get_sample_in_class(self):
-        return self.input_dataframe['BC'].value_counts().sort_index().to_numpy()
+        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
     
 class ETRI_2023_Dataset(Dataset):
     def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
@@ -362,71 +351,60 @@ class ETRI_2023_Dataset(Dataset):
         if self.balanced and not self.train:
             logging.warning("The balance is only for training dataset")
 
-        self.input_dataframe = pd.read_csv(os.path.join(self.path, "etri2023_2s.tsv"), sep='\t', index_col=0)
-        self.input_dataframe = self.input_dataframe.assign(filename=range(len(self.input_dataframe)))
-        self.target_dataframe = pd.read_csv(os.path.join(self.path, "etri2023_2s.tsv"), sep='\t', index_col=0)
-        self.target_dataframe = self.target_dataframe.assign(filename=range(len(self.target_dataframe)))
+        self.dataframe = pd.read_csv(os.path.join(self.path, "etri2023_2s.tsv"), sep='\t', index_col=0)
+        self.dataframe = self.dataframe.assign(filename=range(len(self.dataframe)))
         
-        assert len(self.input_dataframe) == len(self.target_dataframe)
+        assert len(self.dataframe) == len(self.dataframe)
 
         generator = torch.Generator()
         generator.manual_seed(42)
-        train_index = self.input_dataframe['folder'].unique()
+        train_index = self.dataframe['folder'].unique()
         index = torch.randperm(len(train_index), generator=generator)
         train_index = train_index[index[:int(len(index)*0.8)]]
-        test_index = self.input_dataframe['folder'].unique()
+        test_index = self.dataframe['folder'].unique()
         test_index = test_index[index[int(len(index)*0.8):]]
 
         if self.train:
-            self.input_dataframe = self.input_dataframe[self.input_dataframe['folder'].isin(train_index)]
-            self.target_dataframe = self.target_dataframe[self.target_dataframe['folder'].isin(train_index)]
+            self.dataframe = self.dataframe[self.dataframe['folder'].isin(train_index)]
             if self.balanced:
-                _no_bc_input_dataframe = self.input_dataframe[self.input_dataframe['BC'] == 0]
-                _bc_input_dataframe = self.input_dataframe[self.input_dataframe['BC'] != 0]
-                _no_bc_target_dataframe = self.target_dataframe[self.target_dataframe['BC'] == 0]
-                _bc_target_dataframe = self.target_dataframe[self.target_dataframe['BC'] != 0]
-                if len(_no_bc_input_dataframe) > len(_bc_input_dataframe):
-                    _no_bc_input_dataframe = _no_bc_input_dataframe.sample(len(_bc_input_dataframe), random_state=42)
-                    _no_bc_target_dataframe = _no_bc_target_dataframe.sample(len(_bc_target_dataframe), random_state=42)
+                _no_bc_dataframe = self.dataframe[self.dataframe['BC'] == 0]
+                _bc_dataframe = self.dataframe[self.dataframe['BC'] != 0]
+                if len(_no_bc_dataframe) > len(_bc_dataframe):
+                    _no_bc_dataframe = _no_bc_dataframe.sample(len(_bc_dataframe), random_state=42)
                 else:
-                    _bc_input_dataframe = _bc_input_dataframe.sample(len(_no_bc_input_dataframe), random_state=42)
-                    _bc_target_dataframe = _bc_target_dataframe.sample(len(_no_bc_target_dataframe), random_state=42)
-            self.input_dataframe = pd.concat([_no_bc_input_dataframe, _bc_input_dataframe])
-            self.target_dataframe = pd.concat([_no_bc_target_dataframe, _bc_target_dataframe])
+                    _bc_dataframe = _bc_dataframe.sample(len(_no_bc_dataframe), random_state=42)
+            self.dataframe = pd.concat([_no_bc_dataframe, _bc_dataframe])
         else:
-            self.input_dataframe = self.input_dataframe[self.input_dataframe['folder'].isin(test_index)]
-            self.target_dataframe = self.target_dataframe[self.target_dataframe['folder'].isin(test_index)]
+            self.dataframe = self.dataframe[self.dataframe['folder'].isin(test_index)]
 
         # self.input_dataframe = self.input_dataframe[self.input_dataframe['BC'] > 1]
         # self.target_dataframe = self.target_dataframe[self.target_dataframe['BC'] > 1]
-        print(self.input_dataframe)
-        print(self.input_dataframe['BC'].value_counts().sort_index())
+        print(self.dataframe)
+        print(self.dataframe['BC'].value_counts().sort_index())
 
     def __len__(self):
-        return len(self.input_dataframe)
+        return len(self.dataframe)
     
     def __getitem__(self, index):
 
         ret = {}
 
-        input_item = self.input_dataframe.iloc[index]
-        target_item = self.target_dataframe.iloc[index]
+        item = self.dataframe.iloc[index]
 
-        input_idx = input_item['filename']
-        target_idx = target_item['filename']
+        idx = item['filename']
 
-        trans = input_item['transcript']
-        target_trans = target_item['transcript']
-        lable = input_item['BC']
+        trans = item['transcript']
+        target_trans = item['back']
+        label = item['BC']
 
-        input_path = os.path.join(self.path, "audio", "front", f"{str(input_idx)}.wav")
-        target_path = os.path.join(self.path, "audio", "back", f"{str(target_idx)}.wav")
+        input_path = os.path.join(self.path, "audio", "front", f"{str(idx)}.wav")
+        target_path = os.path.join(self.path, "audio", "back", f"{str(idx)}.wav")
 
         input_audio, sr = torchaudio.load(input_path)
         input_audio = torchaudio.transforms.Resample(sr, 16000)(input_audio)
         sr = 16000
         input_audio = input_audio[:, -int(self.length*sr):]
-        if input_audio.size(1) != int(self.length * 1.5):
+        if input_audio.size(1) != int(self.length * sr):
             input_audio = F.pad(input_audio, (0, int(sr * self.length) - input_audio.size(1)), "constant", 0)
         if input_audio.size(0) != 1:
             input_audio = input_audio.sum(0, keepdim=True)
@@ -434,12 +412,12 @@ class ETRI_2023_Dataset(Dataset):
         target_audio, sr = torchaudio.load(target_path)
         target_audio = torchaudio.transforms.Resample(sr, 16000)(target_audio)
         sr = 16000
-        target_audio = target_audio[:, -int(self.predict_length*sr):]
-        if target_audio.size(1) != int(self.predict_length * 1.5):
+        target_audio = target_audio[:, :int(self.predict_length*sr)]
+        if target_audio.size(1) != int(self.predict_length * sr):
             target_audio = F.pad(target_audio, (0, int(sr * self.predict_length) - target_audio.size(1)), "constant", 0)
         if target_audio.size(0) != 1:
             target_audio = target_audio.sum(0, keepdim=True)
-            
+
         sentiment = torch.zeros(5)
         for word in trans.split():
             r_word, s_word = KnuSL.data_list(word)
@@ -451,19 +429,19 @@ class ETRI_2023_Dataset(Dataset):
         
         trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 
-        target_trans = self.tokenizer(target_trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+        target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 
         ret['audio'] = input_audio
         ret['target_audio'] = target_audio
-        ret['label'] = lable
+        ret['label'] = label
         ret['text'] = trans
         ret['target_text'] = target_trans
         ret['sentiment'] = sentiment
         return ret
     
     def get_sample_in_class(self):
-        return self.input_dataframe['BC'].value_counts().sort_index().to_numpy()
-
+        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
+    
 class ETRI_All_Dataset(Dataset):
     def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
         super().__init__()

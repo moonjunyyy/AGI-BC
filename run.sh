@@ -38,6 +38,9 @@ export JAVA_HOME=dirname $(readlink -f $(which java))
 export PATH=$PATH:$JAVA_HOME
 export CUDA_LAUNCH_BLOCKING=1
 
+# rm -r ~/.cache/huggingface/hub/*
+# rm -r /local_datasets/etri*
+
 for i in seeds
 do
     python main.py \
@@ -45,7 +48,7 @@ do
     --mode ${mode} \
     --dataset ${dataset} \
     --seed ${seeds[$i]} \
-    --batch_size 32 \
+    --batch_size 64 \
     --num_workers 8 \
     --epochs 100 \
     --language koBert \

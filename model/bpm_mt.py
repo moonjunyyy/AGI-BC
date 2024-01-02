@@ -13,8 +13,6 @@ class BPM_ST(nn.Module):
             assert self.language_model is not None, "bert must be provided"
         if self.mode != "text_only":
             self.register_module("audio_model", audio_model)
-            for param in self.audio_model.parameters():
-                param.requires_grad = False
             # define the LSTM layer, 4 of layers
             self.audio_feature_size = audio_model.get_feature_size()
             assert self.audio_model is not None, "audio_model must be provided"
@@ -133,7 +131,6 @@ class BPM_MT(nn.Module):
             audio = self.audio_model(audio)
         if self.mode != "audio_only":
             text, _ = self.language_model(text)
-        
         if self.mode == "flatten":
             audio = audio.reshape(AB, -1)
             concat = torch.cat((audio, text.reshape(TB, -1)), dim=1)

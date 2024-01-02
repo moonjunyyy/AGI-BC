@@ -74,9 +74,9 @@ def no_one_left_behind(batch, output):
 
 def cross_entropy_loss(batch, output):
     loss_BC = F.cross_entropy(output['logit'], batch["label"], reduction='none')
-    try:
+    if 'sentiment' in output.keys():
         loss_SP = F.binary_cross_entropy(torch.sigmoid(output['sentiment']), batch["sentiment"])
         loss = 0.9 * loss_BC + 0.1 * loss_SP
-    except:
-        loss = loss_BC
-    return loss.mean(), output['logit']
+        return loss.mean(), output['logit']
+    else:
+        return loss_BC.mean(), output['logit']
