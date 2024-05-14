@@ -15,10 +15,11 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import torch
 import torch.nn.functional as F
-from util.utils import get_dataset, get_audio_model,\
+from utils.utils import get_dataset, get_audio_model,\
      get_language_model, get_backchannel_prediction_model
-from util.criterions import get_criterion
-from util.koalpaca import KoAlpaca
+from utils.criterions import get_criterion
+from utils.koalpaca import KoAlpaca
+from utils.prefetcher import Prefetcher
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 class Trainer:
@@ -50,6 +51,7 @@ class Trainer:
         self.rank = args.rank
         self.ngpus_per_node = torch.cuda.device_count()
         self.dist_backend = args.dist_backend
+        self.node_rank = args.rank
         self.world_size = args.world_size * self.ngpus_per_node
         self.distributed = self.world_size > 1
 
@@ -90,14 +92,18 @@ class Trainer:
                 'You may see unexpected behavior when restarting '
                 'from checkpoints.')
         
+
         tokenizer, language_model = get_language_model(self.language)
         audio_model = get_audio_model(self.audio)
 
         self.train_dataset, self.val_dataset, self.num_class = get_dataset(self.dataset, tokenizer)    
         self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset, shuffle=True, num_replicas=self.world_size, rank=self.rank)
         self.val_sampler = torch.utils.data.distributed.DistributedSampler(self.val_dataset, shuffle=False, num_replicas=self.world_size, rank=self.rank)
-        self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
-        self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
+        # self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
+        # self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
+        self.train_dataloader = Prefetcher(self.num_workers, name='train')
+        self.val_dataloader = Prefetcher(self.num_workers, name='val')
+
 
         if self.model == 'BPM_MT':
             self.is_MT = True
@@ -184,6 +190,7 @@ class Trainer:
             print('No pretrained model')
             if hasattr(self.model_without_ddp, 'pretext_forward'):
                 self.model_without_ddp.pretext_forward(self.train_dataloader)
+                self.train_sampler.epoch += 1
                 torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
                 sys.stdout.flush()
             else:
@@ -192,43 +199,69 @@ class Trainer:
         bert_params = []
         other_params = []
         for name, param in self.model.named_parameters():
+            # print(name)
             if 'language_model' in name or 'audio_model' in name:
                 bert_params.append(param)
             elif 'prompt' in name:
                 prompt_params.append(param)
             else:
                 other_params.append(param)
-        optimizer = torch.optim.Adam(other_params, lr=1e-4, weight_decay=self.weight_decay)
-        optimizer.add_param_group({'params': bert_params, 'lr': 1e-4})
+                
+        # optimizer = torch.optim.Adam(other_params, lr=1e-4, weight_decay=self.weight_decay)
+        # optimizer.add_param_group({'params': bert_params, 'lr': 1e-4})
+        optimizer = torch.optim.Adam(other_params, lr=5e-5, weight_decay=self.weight_decay)
+        optimizer.add_param_group({'params': bert_params, 'lr': 5e-5})
         # optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
+        
         for epoch in range(self.epochs):
-            self.train_sampler.set_epoch(epoch if not hasattr(self.model_without_ddp, 'pretext_forward') else epoch + self.pretext_epoch)
+            # self.train_sampler.set_epoch(epoch)
+            if hasattr(self.model_without_ddp, 'pre_epoch'):
+                self.train_dataloader.load(self.train_dataset, None, self.batch_size*4, sampler=self.train_sampler)
+                self.model_without_ddp.pre_epoch(self.train_dataloader)
+                self.train_sampler.epoch += 1
+
             self.model.train()
 
             train_acc = 0
             train_loss = 0
             count = 0
+
+            self.train_dataloader.load(self.train_dataset, None, self.batch_size, sampler=self.train_sampler)
             for b, batch in enumerate(self.train_dataloader):
                 
+                # print(batch['identity'].max())
+                # print(batch['identity'].min())
+                # continue
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
                     batch[key] = batch[key].to(self.local_rank)
+                # print(f"load data {self.rank} : {time.time() - start}"); start = time.time()
 
                 y = self.model.forward(batch)
-                loss, logit = self.criteria(batch, y)
-                loss = loss.mean()
+                
+                loss = 0
+                if 'logit' in y.keys():
+                    loss, logit = self.criteria(batch, y)
+                    loss = loss.mean()
 
+                    accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
+                    
+                    train_acc += accuracy.item() * len(batch["label"])
+                    train_loss += loss.item() * len(batch["label"])
+                    count += len(batch["label"])
+                    # if self.verbose:
+                    #     print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
+                    l, c = logit.argmax(dim=-1).unique(return_counts=True)
                 if 'consistency_loss' in y.keys():
                     loss = loss + 0.1 * y['consistency_loss'].mean()
-
+                if 'identity' in y.keys():
+                    loss = loss + 0.5 * y['identity'].mean()
+                if 'contrastive_loss' in y.keys():
+                    loss = loss + 0.5 * y['contrastive_loss'].mean()
                 if self.is_MT:
                     loss = 0.9 * loss + 0.1 * F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
 
-                accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
-                
-                train_acc += accuracy.item() * len(batch["label"])
-                train_loss += loss.item() * len(batch["label"])
-                count += len(batch["label"])
+                # print(f"forward {self.rank} : {time.time() - start}"); start = time.time()
 
                 # Zero the gradients
                 optimizer.zero_grad()
@@ -236,6 +269,7 @@ class Trainer:
                 # adam_optimizer.zero_grad()
                 # Backpropagation
                 loss.backward()
+                # print(f"backward {self.rank} : {time.time() - start}"); start = time.time()
                 # max_grad_ = 0
                 # for name, param in self.model.named_parameters():
                 #     if param.grad is not None:
@@ -243,18 +277,17 @@ class Trainer:
                 # print(max_grad_)
                 # Update the model parameters
                 optimizer.step()
+                # print(f"step {self.rank} : {time.time() - start}"); start = time.time()
                 # sgd_optimizer.step()
                 # adam_optimizer.step()
-
-                if self.verbose:
-                    print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
-                l, c = logit.argmax(dim=-1).unique(return_counts=True)
                 gc.collect()
+                print(f"Epoch : {epoch}, {b}/{len(self.train_dataloader)}, Loss : {loss.item():.6f}, Acc : {accuracy.item()*100:.3f}", end='\r')
+            print(flush=True)
+            self.train_sampler.epoch += 1
             train_acc /= count
             train_loss /= count
             self.model.eval()
             with torch.no_grad():
-
                 accuracy = 0
                 loss     = 0
                 tp = torch.tensor([0 for _ in range(self.num_class)],device=self.local_rank)
@@ -265,7 +298,9 @@ class Trainer:
                 label = []
                 pred = []
 
-                for batch in self.val_dataloader:
+                self.val_dataloader.load(self.val_dataset, None, self.batch_size * 2, sampler=self.val_sampler)
+                for i, batch in enumerate(self.val_dataloader):
+                    print(f"Validation {i}/{len(self.val_dataloader)}", end='\r')
                     # Move the batch to GPU if CUDA is available
                     for key in batch:
                         batch[key] = batch[key].to(self.local_rank)
@@ -348,17 +383,21 @@ class Trainer:
                         p = pred == p
                         print(f"{(a & p).sum().item():5d}", end=' ')
                     print()
+                
+                if hasattr(self.model_without_ddp, 'post_epoch'):
+                    self.val_dataloader.load(self.val_dataset, None, self.batch_size * 2, sampler=self.val_sampler)
+                    self.model_without_ddp.post_epoch(self.val_dataloader)
                 sys.stdout.flush()
             gc.collect()
         
     def init_distributed(self):
         if self.distributed:
             if torch.cuda.is_available():
-                self.gpu    = self.local_rank % self.ngpus_per_nodes
+                self.gpu    = self.local_rank % self.ngpus_per_node
                 self.device = torch.device(self.gpu)
                 if self.distributed:
                     self.local_rank = self.gpu
-                    self.rank = self.node_rank * self.ngpus_per_nodes + self.gpu
+                    self.rank = self.node_rank * self.ngpus_per_node + self.gpu
                     time.sleep(self.rank * 0.1) # prevent port collision
                     print(f'rank {self.rank} is running...')
                     dist.init_process_group(backend=self.dist_backend, init_method=self.dist_url,

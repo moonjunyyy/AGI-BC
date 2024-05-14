@@ -8,7 +8,7 @@ import torch.multiprocessing as mp
 import matplotlib.pyplot as plt
 import torchaudio
 from itertools import permutations
-from util.utils import get_audio_model, get_language_model
+from utils.utils import get_audio_model, get_language_model
 from layer.cross_attention_layer import CrossAttentionLayer
 from layer.self_attention_layer import SelfAttentionLayer
 from layer.lora import LoRA

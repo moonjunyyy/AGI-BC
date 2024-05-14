@@ -36,7 +36,8 @@ def get_language_model(name):
 def get_dataset(name, tokenizer):
     from torch.utils.data import Subset
     from dataset.SWBD_Dataset import SWBD_Dataset
-    from dataset.ETRI_Dataset import ETRI_Corpus_Dataset, ETRI_Generation_Dataset, ETRI_2022_Dataset, ETRI_2023_Dataset, ETRI_All_Dataset, ETRI_ALL_Client_Dataset
+    from dataset.ETRI_Dataset import ETRI_Corpus_Dataset, ETRI_Generation_Dataset, ETRI_2022_Dataset, ETRI_2023_Dataset, ETRI_All_Dataset, ETRI_ALL_Client_Dataset, ETRI_All_Random_Testset_Dataset, ETRI_All_End_SampleMix_Dataset
+    from dataset.ETRI_Wrong_Target import ETRI_All_In_BC_Dataset, ETRI_All_Wrong_Target_Dataset
     if name == 'SWBD':
         dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, length=1.5)
         train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
@@ -66,21 +67,51 @@ def get_dataset(name, tokenizer):
         train_dataset = ETRI_ALL_Client_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
         val_dataset = ETRI_ALL_Client_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
         num_class = 4
+    elif name == 'ETRI_ALL_In_BC':
+        train_dataset = ETRI_All_In_BC_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_All_In_BC_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
+    elif name == 'ETRI_ALL_Wrong_Target':
+        train_dataset = ETRI_All_Wrong_Target_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_All_Wrong_Target_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
+    elif name == 'ETRI_ALL_Random_Testset':
+        train_dataset = ETRI_All_Random_Testset_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_All_Random_Testset_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
+    elif name == 'ETRI_All_End_SampleMix_Dataset':
+        train_dataset = ETRI_All_End_SampleMix_Dataset(path = '/data2/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_All_End_SampleMix_Dataset(path = '/data2/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
     else:
         NotImplementedError
 
     return train_dataset, val_dataset, num_class
 
 def get_backchannel_prediction_model(name):
-    from model.bpm_mt import BPM_MT, BPM_ST
+    from model.bpm_mt import BPM_MT, BPM_ST, BPM_ST_Target, BPM_ST_Target_Token
     from model.ours import Ours
     from model.adversarial import Adversarial
+    from model.deidentifier import Deidentifier
+    from model.identity_estimator import Identity_Estimator
+    from model.lora import LoRA_BC
+    from model.finetune import Finetune
+    from model.contrastive_prototype import Contrastive_Prototype
+    from model.Proxy_Prototype import Proxy_Prototype
     try:
         return {
             'BPM_MT': BPM_MT,
             'BPM_ST': BPM_ST,
+            'BPM_ST_Target': BPM_ST_Target,
+            'BPM_ST_Target_Token': BPM_ST_Target_Token,
             'Ours': Ours,
             'ADV' : Adversarial,
+            'Deidentifier' : Deidentifier,
+            'Identity_Estimator' : Identity_Estimator,
+            'LoRA' : LoRA_BC,
+            'Finetune' : Finetune,
+            'Contrastive_Prototype' : Contrastive_Prototype,
+            'Proxy_Prototype' : Proxy_Prototype
         }[name]
     except:
         raise NotImplementedError

@@ -1,6 +1,7 @@
 import os
 import math
 import logging
+import asyncio
 import pandas as pd
 from typing import Callable, Optional
 import torch
@@ -8,8 +9,50 @@ from torch import Tensor
 import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import Dataset
-from util.knusl import KnuSL
+from utils.knusl import KnuSL
 
+folder_list = [
+    "220918_남정희_김우진",
+    "220918_남정희_백보경",
+    "220918_남정희_손석규",
+    "220918_남정희_정정연",
+    "220918_남정희_차지수",
+    "220920_강명진_오주현",
+    "220920_강명진_윤수진",
+    "220920_강명진_정은영",
+    "220920_강명진_조주현",
+    "220922_강명진_오은숙",
+    "220922_강명진_정준호",
+    "220922_강주영_강태랑",
+    "220922_강주영_김은영",
+    "220922_강주영_이준혁",
+    "220922_강주영_정유림",
+    "220922_강주영_최보규",
+    "220925_남정희_김민석",
+    "220925_남정희_박종길",
+    "220925_남정희_서지원",
+    "220925_남정희_서혜연",
+    "220925_남정희_이주왕",
+    "220925_남정희_장은태",
+    "220925_남정희_한성민",
+    "220925_남정희_허세민",
+    "220929_강명진_김민수",
+    "220929_강명진_김정현",
+    "220929_강명진_류호정",
+    "220929_강명진_유채이",
+    "220929_강주영_김영미",
+    "220929_강주영_류서영",
+    "220929_강주영_송선희",
+    "220929_강주영_임지윤",
+    "221006_윤지선_박일용",
+    "221006_윤지선_안수진",
+    "221006_윤지선_용금여",
+    "221006_윤지선_임현숙",
+    "221006_윤지선_조영현",
+    "221006_윤지선_채원석",
+    "221006_윤지선_최주희",
+    "220918_남정희_김지수",
+]
 class ETRI_Corpus_Dataset(Dataset):
     def __init__(self, path, tokenizer, train = False, transform : Callable=None, length :float = 1.5) -> None:
         super().__init__()
@@ -320,6 +363,10 @@ class ETRI_2022_Dataset(Dataset):
 
         target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 
+        identity = folder_list.index(item['folder'])
+        identity = identity * 2 + (item['role'] == 'client')
+        ret['identity'] = identity
+
         ret['audio'] = input_audio
         ret['target_audio'] = target_audio
         ret['label'] = label
@@ -431,6 +478,10 @@ class ETRI_2023_Dataset(Dataset):
 
         target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
 
+        identity = int(item['folder'].replace("ST", ""))
+        identity = identity * 2 + (item['role'] == 'client') + 80
+        ret['identity'] = identity
+
         ret['audio'] = input_audio
         ret['target_audio'] = target_audio
         ret['label'] = label
@@ -502,6 +553,236 @@ class ETRI_ALL_Client_Dataset(Dataset):
     def get_sample_in_class(self):
         return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()
     
+
+class ETRI_2022_Random_Testset_Dataset(Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
+        super().__init__()
+        print("Load ETRI_2022_Dataset...")
+        self.tokenizer = tokenizer
+        self.path = os.path.join(path, "etri2022_2s")
+        if os.path.isdir(self.path) == False:
+            print("Copy etri2022_2s.zip")
+            import shutil
+            import zipfile
+            shutil.copy("/data/datasets/etri2022_2s.zip", path)
+            zipfile.ZipFile(f"{path}/etri2022_2s.zip").extractall(path)
+            shutil.rmtree(f"{path}/etri2022_2s.zip", ignore_errors=True)
+        self.train = train
+        self.length = length
+        self.predict_length = predict_length
+        self.balanced = balanced
+        if self.balanced and not self.train:
+            logging.warning("The balance is only for training dataset")
+
+        self.dataframe = pd.read_csv(os.path.join(self.path, "etri2022_2s.tsv"), sep='\t', index_col=0)
+        self.dataframe = self.dataframe.assign(filename=range(len(self.dataframe)))
+        
+        assert len(self.dataframe) == len(self.dataframe)
+
+        trainset = self.dataframe.sample(frac=0.8, random_state=42)
+        if self.train:
+            self.dataframe = trainset
+        else:
+            self.dataframe = self.dataframe.drop(trainset.index)
+
+        # self.input_dataframe = self.input_dataframe[self.input_dataframe['BC'] > 1]
+        # self.target_dataframe = self.target_dataframe[self.target_dataframe['BC'] > 1]
+        print(self.dataframe)
+        print(self.dataframe['BC'].value_counts().sort_index())
+
+    def __len__(self):
+        return len(self.dataframe)
+    
+    async def audio_loader(self, path, length):
+        audio, sr = torchaudio.load(path)
+        audio = torchaudio.transforms.Resample(sr, 16000)(audio)
+        sr = 16000
+        audio = audio[:, -int(length*sr):]
+        if audio.size(1) != int(sr * length):
+            audio = F.pad(audio, (0, int(sr * length) - audio.size(1)), "constant", 0)
+        if audio.size(0) != 1:
+            audio = audio.sum(0, keepdim=True)
+        return audio
+
+    def __getitem__(self, index):
+
+        ret = {}
+
+        item = self.dataframe.iloc[index]
+
+        idx = item['filename']
+
+        trans = item['transcript']
+        target_trans = item['back']
+        label = item['BC']
+
+        input_path = os.path.join(self.path, "audio", "front", f"{str(idx)}.wav")
+        target_path = os.path.join(self.path, "audio", "back", f"{str(idx)}.wav")
+
+        input_audio, sr = torchaudio.load(input_path)
+        input_audio = torchaudio.transforms.Resample(sr, 16000)(input_audio)
+        sr = 16000
+        input_audio = input_audio[:, -int(self.length*sr):]
+        if input_audio.size(1) != int(self.length * sr):
+            input_audio = F.pad(input_audio, (0, int(sr * self.length) - input_audio.size(1)), "constant", 0)
+        if input_audio.size(0) != 1:
+            input_audio = input_audio.sum(0, keepdim=True)
+
+        target_audio, sr = torchaudio.load(target_path)
+        target_audio = torchaudio.transforms.Resample(sr, 16000)(target_audio)
+        sr = 16000
+        target_audio = target_audio[:, :int(self.predict_length*sr)]
+        if target_audio.size(1) != int(self.predict_length * sr):
+            target_audio = F.pad(target_audio, (0, int(sr * self.predict_length) - target_audio.size(1)), "constant", 0)
+        if target_audio.size(0) != 1:
+            target_audio = target_audio.sum(0, keepdim=True)
+
+        sentiment = torch.zeros(5)
+        for word in trans.split():
+            r_word, s_word = KnuSL.data_list(word)
+            if s_word != 'None':
+                sentiment[int(s_word)] += 1
+            else:
+                sentiment[0] += 1
+        sentiment = sentiment / sentiment.sum()
+        
+        trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+
+        target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+
+        identity = folder_list.index(item['folder'])
+        identity = identity * 2 + (item['role'] == 'client')
+        ret['identity'] = identity
+
+        ret['audio'] = input_audio
+        ret['target_audio'] = target_audio
+        ret['label'] = label
+        ret['text'] = trans
+        ret['target_text'] = target_trans
+        ret['sentiment'] = sentiment
+        return ret
+    
+    def get_sample_in_class(self):
+        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
+    
+class ETRI_2023_Random_Testset_Dataset(Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
+        super().__init__()
+        print("Load ETRI_2023_Dataset...")
+        self.tokenizer = tokenizer
+        self.path = os.path.join(path, "etri2023_2s")
+        if os.path.isdir(self.path) == False:
+            print("Copy etri2023_2s.zip")
+            import shutil
+            import zipfile
+            shutil.copy("/data/datasets/etri2023_2s.zip", path)
+            zipfile.ZipFile(f"{path}/etri2023_2s.zip").extractall(path)
+            shutil.rmtree(f"{path}/etri2023_2s.zip", ignore_errors=True)
+        self.train = train
+        self.length = length
+        self.predict_length = predict_length
+        self.balanced = balanced
+        if self.balanced and not self.train:
+            logging.warning("The balance is only for training dataset")
+
+        self.dataframe = pd.read_csv(os.path.join(self.path, "etri2023_2s.tsv"), sep='\t', index_col=0)
+        self.dataframe = self.dataframe.assign(filename=range(len(self.dataframe)))
+        
+        assert len(self.dataframe) == len(self.dataframe)
+
+        trainset = self.dataframe.sample(frac=0.8, random_state=42)
+        if self.train:
+            self.dataframe = trainset
+        else:
+            self.dataframe = self.dataframe.drop(trainset.index)
+
+        # self.input_dataframe = self.input_dataframe[self.input_dataframe['BC'] > 1]
+        # self.target_dataframe = self.target_dataframe[self.target_dataframe['BC'] > 1]
+        print(self.dataframe)
+        print(self.dataframe['BC'].value_counts().sort_index())
+
+    def __len__(self):
+        return len(self.dataframe)
+    
+    def __getitem__(self, index):
+
+        ret = {}
+
+        item = self.dataframe.iloc[index]
+
+        idx = item['filename']
+
+        trans = item['transcript']
+        target_trans = item['back']
+        label = item['BC']
+
+        input_path = os.path.join(self.path, "audio", "front", f"{str(idx)}.wav")
+        target_path = os.path.join(self.path, "audio", "back", f"{str(idx)}.wav")
+
+        input_audio, sr = torchaudio.load(input_path)
+        input_audio = torchaudio.transforms.Resample(sr, 16000)(input_audio)
+        sr = 16000
+        input_audio = input_audio[:, -int(self.length*sr):]
+        if input_audio.size(1) != int(self.length * sr):
+            input_audio = F.pad(input_audio, (0, int(sr * self.length) - input_audio.size(1)), "constant", 0)
+        if input_audio.size(0) != 1:
+            input_audio = input_audio.sum(0, keepdim=True)
+
+        target_audio, sr = torchaudio.load(target_path)
+        target_audio = torchaudio.transforms.Resample(sr, 16000)(target_audio)
+        sr = 16000
+        target_audio = target_audio[:, :int(self.predict_length*sr)]
+        if target_audio.size(1) != int(self.predict_length * sr):
+            target_audio = F.pad(target_audio, (0, int(sr * self.predict_length) - target_audio.size(1)), "constant", 0)
+        if target_audio.size(0) != 1:
+            target_audio = target_audio.sum(0, keepdim=True)
+
+        sentiment = torch.zeros(5)
+        for word in trans.split():
+            r_word, s_word = KnuSL.data_list(word)
+            if s_word != 'None':
+                sentiment[int(s_word)] += 1
+            else:
+                sentiment[0] += 1
+        sentiment = sentiment / sentiment.sum()
+        
+        trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+
+        target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+
+        identity = int(item['folder'].replace("ST", ""))
+        identity = identity * 2 + (item['role'] == 'client') + 80
+        ret['identity'] = identity
+
+        ret['audio'] = input_audio
+        ret['target_audio'] = target_audio
+        ret['label'] = label
+        ret['text'] = trans
+        ret['target_text'] = target_trans
+        ret['sentiment'] = sentiment
+        return ret
+    
+    def get_sample_in_class(self):
+        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
+    
+class ETRI_All_Random_Testset_Dataset(Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
+        super().__init__()
+        print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI_2022_Random_Testset_Dataset(path, tokenizer, train, balanced, length, predict_length)
+        self.dataset_2023 = ETRI_2023_Random_Testset_Dataset(path, tokenizer, train, balanced, length, predict_length)
+
+    def __len__(self):
+        return len(self.dataset_2022) + len(self.dataset_2023)
+    
+    def __getitem__(self, index):
+        if index < len(self.dataset_2022):
+            return self.dataset_2022[index]
+        else:
+            return self.dataset_2023[index - len(self.dataset_2022)]
+        
+    def get_sample_in_class(self):
+        return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()
 
 class ETRI_2022_Video_Dataset(Dataset):
     def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
@@ -624,3 +905,217 @@ class ETRI_2022_Video_Dataset(Dataset):
     
     def get_sample_in_class(self):
         return self.input_dataframe['BC'].value_counts().sort_index().to_numpy()
+    
+
+class ETRI_2022_End_SampleMix_Dataset(Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
+        super().__init__()
+        print("Load ETRI_2023_Dataset...")
+        self.tokenizer = tokenizer
+        self.path = os.path.join(path, "etri2022_end")
+        if os.path.isdir(self.path) == False:
+            print("Copy etri2022_end.zip")
+            import shutil
+            import zipfile
+            shutil.copy("/data/datasets/etri2022_end.zip", path)
+            zipfile.ZipFile(f"{path}/etri2022_end.zip").extractall(path)
+            shutil.rmtree(f"{path}/etri2022_end.zip", ignore_errors=True)
+        self.train = train
+        self.length = length
+        self.predict_length = predict_length
+        self.balanced = balanced
+        if self.balanced and not self.train:
+            logging.warning("The balance is only for training dataset")
+
+        self.dataframe = pd.read_csv(os.path.join(self.path, "etri2022_end.tsv"), sep='\t', index_col=0)
+        self.dataframe = self.dataframe.assign(filename=range(len(self.dataframe)))
+        
+        assert len(self.dataframe) == len(self.dataframe)
+
+        trainset = self.dataframe.sample(frac=0.8, random_state=42)
+        if self.train:
+            self.dataframe = trainset
+        else:
+            self.dataframe = self.dataframe.drop(trainset.index)
+
+        # self.input_dataframe = self.input_dataframe[self.input_dataframe['BC'] > 1]
+        # self.target_dataframe = self.target_dataframe[self.target_dataframe['BC'] > 1]
+        print(self.dataframe)
+        print(self.dataframe['BC'].value_counts().sort_index())
+
+    def __len__(self):
+        return len(self.dataframe)
+    
+    def __getitem__(self, index):
+
+        ret = {}
+
+        item = self.dataframe.iloc[index]
+
+        idx = item['filename']
+
+        trans = item['transcript']
+        target_trans = item['back']
+        label = item['BC']
+
+        input_path = os.path.join(self.path, "audio", "front", f"{str(idx)}.wav")
+        target_path = os.path.join(self.path, "audio", "back", f"{str(idx)}.wav")
+
+        input_audio, sr = torchaudio.load(input_path)
+        input_audio = torchaudio.transforms.Resample(sr, 16000)(input_audio)
+        sr = 16000
+        input_audio = input_audio[:, -int(self.length*sr):]
+        if input_audio.size(1) != int(self.length * sr):
+            input_audio = F.pad(input_audio, (0, int(sr * self.length) - input_audio.size(1)), "constant", 0)
+        if input_audio.size(0) != 1:
+            input_audio = input_audio.sum(0, keepdim=True)
+
+        target_audio, sr = torchaudio.load(target_path)
+        target_audio = torchaudio.transforms.Resample(sr, 16000)(target_audio)
+        sr = 16000
+        target_audio = target_audio[:, :int(self.predict_length*sr)]
+        if target_audio.size(1) != int(self.predict_length * sr):
+            target_audio = F.pad(target_audio, (0, int(sr * self.predict_length) - target_audio.size(1)), "constant", 0)
+        if target_audio.size(0) != 1:
+            target_audio = target_audio.sum(0, keepdim=True)
+
+        sentiment = torch.zeros(5)
+        for word in trans.split():
+            r_word, s_word = KnuSL.data_list(word)
+            if s_word != 'None':
+                sentiment[int(s_word)] += 1
+            else:
+                sentiment[0] += 1
+        sentiment = sentiment / sentiment.sum()
+        
+        trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+
+        target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+
+        # identity = folder_list.index(item['folder'])
+        # identity = identity * 2 + (item['role'] == 'client')
+        # ret['identity'] = identity
+
+        ret['audio'] = input_audio
+        ret['target_audio'] = target_audio
+        ret['label'] = label
+        ret['text'] = trans
+        ret['target_text'] = target_trans
+        ret['sentiment'] = sentiment
+        return ret
+    
+    def get_sample_in_class(self):
+        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
+    
+class ETRI_2023_End_SampleMix_Dataset(Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
+        super().__init__()
+        print("Load ETRI_2023_Dataset...")
+        self.tokenizer = tokenizer
+        self.path = os.path.join(path, "etri2023_end")
+        if os.path.isdir(self.path) == False:
+            print("Copy etri2023_end.zip")
+            import shutil
+            import zipfile
+            shutil.copy("/data/datasets/etri2023_end.zip", path)
+            zipfile.ZipFile(f"{path}/etri2023_end.zip").extractall(path)
+            shutil.rmtree(f"{path}/etri2023_end.zip", ignore_errors=True)
+        self.train = train
+        self.length = length
+        self.predict_length = predict_length
+        self.balanced = balanced
+        if self.balanced and not self.train:
+            logging.warning("The balance is only for training dataset")
+
+        self.dataframe = pd.read_csv(os.path.join(self.path, "etri2023_end.tsv"), sep='\t', index_col=0)
+        self.dataframe = self.dataframe.assign(filename=range(len(self.dataframe)))
+        
+        assert len(self.dataframe) == len(self.dataframe)
+
+        trainset = self.dataframe.sample(frac=0.8, random_state=42)
+        if self.train:
+            self.dataframe = trainset
+        else:
+            self.dataframe = self.dataframe.drop(trainset.index)
+
+        # self.input_dataframe = self.input_dataframe[self.input_dataframe['BC'] > 1]
+        # self.target_dataframe = self.target_dataframe[self.target_dataframe['BC'] > 1]
+        print(self.dataframe)
+        print(self.dataframe['BC'].value_counts().sort_index())
+
+    def __len__(self):
+        return len(self.dataframe)
+    
+    def __getitem__(self, index):
+        ret = {}
+
+        item = self.dataframe.iloc[index]
+
+        idx = item['filename']
+
+        trans = item['transcript']
+        target_trans = item['back']
+        label = item['BC']
+
+        input_path = os.path.join(self.path, "audio", "front", f"{str(idx)}.wav")
+        target_path = os.path.join(self.path, "audio", "back", f"{str(idx)}.wav")
+
+        input_audio, sr = torchaudio.load(input_path)
+        input_audio = torchaudio.transforms.Resample(sr, 16000)(input_audio)
+        sr = 16000
+        input_audio = input_audio[:, -int(self.length*sr):]
+        if input_audio.size(1) != int(self.length * sr):
+            input_audio = F.pad(input_audio, (0, int(sr * self.length) - input_audio.size(1)), "constant", 0)
+        if input_audio.size(0) != 1:
+            input_audio = input_audio.sum(0, keepdim=True)
+
+        target_audio, sr = torchaudio.load(target_path)
+        target_audio = torchaudio.transforms.Resample(sr, 16000)(target_audio)
+        sr = 16000
+        target_audio = target_audio[:, :int(self.predict_length*sr)]
+        if target_audio.size(1) != int(self.predict_length * sr):
+            target_audio = F.pad(target_audio, (0, int(sr * self.predict_length) - target_audio.size(1)), "constant", 0)
+        if target_audio.size(0) != 1:
+            target_audio = target_audio.sum(0, keepdim=True)
+
+        sentiment = torch.zeros(5)
+        for word in trans.split():
+            r_word, s_word = KnuSL.data_list(word)
+            if s_word != 'None':
+                sentiment[int(s_word)] += 1
+            else:
+                sentiment[0] += 1
+        sentiment = sentiment / sentiment.sum()
+        
+        trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+        target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+
+        ret['audio'] = input_audio
+        ret['target_audio'] = target_audio
+        ret['label'] = label
+        ret['text'] = trans
+        ret['target_text'] = target_trans
+        ret['sentiment'] = sentiment
+        return ret
+    
+    def get_sample_in_class(self):
+        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
+    
+class ETRI_All_End_SampleMix_Dataset(Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
+        super().__init__()
+        print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI_2022_End_SampleMix_Dataset(path, tokenizer, train, balanced, length, predict_length)
+        self.dataset_2023 = ETRI_2023_End_SampleMix_Dataset(path, tokenizer, train, balanced, length, predict_length)
+
+    def __len__(self):
+        return len(self.dataset_2022) + len(self.dataset_2023)
+    
+    def __getitem__(self, index):
+        if index < len(self.dataset_2022):
+            return self.dataset_2022[index]
+        else:
+            return self.dataset_2023[index - len(self.dataset_2022)]
+        
+    def get_sample_in_class(self):
+        return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()
