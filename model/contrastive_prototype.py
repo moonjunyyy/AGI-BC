@@ -10,12 +10,12 @@ from layer.self_attention_layer import SelfAttentionLayer
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 
-class Ours(nn.Module):
+class Contrastive_Prototype(nn.Module):
     def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy"):
-        super(Ours, self).__init__()
+        super(Contrastive_Prototype, self).__init__()
 
         self.multi_modal = False
-        self.class_wise = False
+        self.class_wise = True
         self.cross_attn = False
         self.consistency = False
 
@@ -55,20 +55,7 @@ class Ours(nn.Module):
         self.mem_size = 60000
 
         self.dropout = nn.Dropout(dropout)
-        # if self.mode == "audio_only" or self.mode == "text_only":
-        #     self.fc_layer_1 = nn.Linear(768, output_size)
-        # elif self.mode == "flatten":
-        #     self.fc_layer_1 = nn.Linear(768 * 65, output_size)
-        # else:
-        #     # self.fc_layer_1 = nn.Linear(794, output_size)
-        #     self.fc_layer_1 = nn.Linear(768 + self.audio_model.get_feature_size(), output_size)
-        # self.relu = nn.ReLU()
-        # if self.mode == "hierarchical":
-        #     self.classifier = nn.Linear(output_size, num_class - 1)
-        #     self.BC_classifier = nn.Linear(output_size, 2)
-        # else:
         self.classifier = nn.Linear(768 + self.audio_model.get_feature_size(), num_class)
-        # self.BC_classifier = nn.Linear(output_size, 2)
 
     def lora_on(self):
         for name, module in self.audio_model.named_modules():
@@ -152,7 +139,7 @@ class Ours(nn.Module):
         # self.text_cluster = torch.arange(self.num_cluster).repeat(1,self.num_inner_cluster).to(self.parameters().__next__().device)
         # return
 
-        if os.path.exists("features.pt"):
+        if os.path.exists(f"features.pt") and False:
             self.lora_off()
             with torch.no_grad():
                 features = torch.load("features.pt")
@@ -163,70 +150,6 @@ class Ours(nn.Module):
                 self.labels = features["labels"]
         else:
             self.lora_off()
-            optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-
-            # for name, param in self.audio_model.named_parameters():
-            #     if "feature_extractor" in name or "feature_projection" in name:
-            #         param.requires_grad = True
-            #     else:
-            #         param.requires_grad = False
-            # for name, param in self.language_model.named_parameters():
-            #     if "embeddings" in name:
-            #         param.requires_grad = True
-            #     else:
-            #         param.requires_grad = False
-
-            # for epoch in range(1):
-            #     print(f"{epoch+1}", end='')
-            #     for n, x in enumerate(dataloader):
-            #         device = self.parameters().__next__().device
-
-            #         audio = x["audio"]
-            #         target_audio = x["target_audio"]
-
-            #         audio = audio.to(device)
-            #         target_audio = target_audio.to(device)
-
-            #         audio = audio[:, 0, :]
-            #         audio = self.audio_model.processor(audio.squeeze(1), return_tensors="pt", sampling_rate=16000, padding=True).input_values.squeeze().to(device)
-            #         audio = self.audio_model.model.feature_extractor(audio)
-            #         audio = self.audio_model.model.feature_projection(audio.transpose(1, 2))
-
-            #         target_audio = target_audio[:, 0, :]
-            #         target_audio = self.audio_model.processor(target_audio.squeeze(1), return_tensors="pt", sampling_rate=16000, padding=True).input_values.squeeze().to(device)
-            #         target_audio = self.audio_model.model.feature_extractor(target_audio)
-            #         target_audio = self.audio_model.model.feature_projection(target_audio.transpose(1, 2))
-            #         # target_audio = self.audio_model.model.encoder.pos_conv_embed(target_audio)
-            #         # target_audio = self.audio_model.model.encoder.layer_norm(target_audio)
-            #         # target_audio = self.audio_model.model.encoder.dropout(target_audio)
-
-            #         audio = torch.cat((audio, target_audio), dim=1)
-            #         audio = self.audio_model.model.encoder(audio).last_hidden_state
-            #         audio = audio.mean(dim=1)
-
-            #         text = x["text"]
-            #         target_text = x["target_text"]
-
-            #         text = text.to(device)
-            #         target_text = target_text.to(device)
-
-            #         text = self.language_model.embeddings(text)
-            #         target_text = self.language_model.embeddings(target_text)
-            #         text = torch.cat((text, target_text), dim=1)
-            #         text = self.language_model.encoder(text).last_hidden_state
-            #         text = text[:, 0, :]
-
-            #         feature = torch.cat((audio, text), dim=1)
-            #         pred = self.fc_layer_1(self.dropout(feature))
-            #         pred = self.relu(pred)
-            #         pred = self.classifier(self.dropout(pred))
-            #         loss = F.cross_entropy(pred, x["label"].to(device))
-            #         optimizer.zero_grad()
-            #         loss.backward()
-            #         optimizer.step()
-            #         print(f"{n+1}/{len(dataloader)}, loss : {loss.item()}", end='\r')
-            #     print()
-                
             for name, param in self.audio_model.named_parameters():
                 param.requires_grad = False
             for name, param in self.language_model.named_parameters():
@@ -240,60 +163,122 @@ class Ours(nn.Module):
                 self.target_texts = torch.empty(0, device=device)
                 self.labels = torch.empty(0, device=device)
 
+            for name, param in self.audio_model.named_parameters():
+                if 'encoder' in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+                param.requires_grad = True
+            for name, param in self.language_model.named_parameters():
+                if 'encoder' in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+            optimizer = torch.optim.SGD(self.parameters(), lr=2e-6)
+            sampler = dataloader.sampler
+            for pre_epoch in range(1):
+                sampler.set_epoch(pre_epoch)
                 for n, x in enumerate(dataloader):
-                    print(f"{n+1}/{len(dataloader)}", end='\r')
-
+                    print(f"{n+1}/{len(dataloader)} : ", end="")
+                    optimizer.zero_grad()
                     audio = x["audio"]
                     target_audio = x["target_audio"]
-
-                    
-                    audio = audio.to(device)
-                    target_audio = target_audio.to(device)
+                    text = x["text"]
+                    target_text = x["target_text"]
+                    audio = audio.to(self.parameters().__next__().device)
+                    target_audio = target_audio.to(self.parameters().__next__().device)
+                    text = text.to(self.parameters().__next__().device)
+                    target_text = target_text.to(self.parameters().__next__().device)
 
                     audio = audio[:, 0, :]
-                    audio = self.audio_model.processor(audio.squeeze(1), return_tensors="pt", sampling_rate=16000, padding=True).input_values.squeeze().to(device)
+                    audio = self.audio_model.processor(audio.squeeze(1), return_tensors="pt", sampling_rate=16000, padding=True).input_values.squeeze().to(self.parameters().__next__().device)
                     audio = self.audio_model.model.feature_extractor(audio)
                     audio = self.audio_model.model.feature_projection(audio.transpose(1, 2))
                     audio = self.audio_model.model.encoder(audio)[0]
                     audio = audio.mean(dim=1)
-                    self.audios = torch.cat((self.audios, audio), dim=0)
-
-                    target_audio = target_audio[:, 0, :]
-                    target_audio = self.audio_model.processor(target_audio.squeeze(1), return_tensors="pt", sampling_rate=16000, padding=True).input_values.squeeze().to(device)
-                    target_audio = self.audio_model.model.feature_extractor(target_audio)
-                    target_audio = self.audio_model.model.feature_projection(target_audio.transpose(1, 2))
-                    # target_audio = self.audio_model.model.encoder.pos_conv_embed(target_audio)
-                    # target_audio = self.audio_model.model.encoder.layer_norm(target_audio)
-                    # target_audio = self.audio_model.model.encoder.dropout(target_audio)
-                    self.target_audios = torch.cat((self.target_audios, target_audio), dim=0)
-                    text = x["text"]
-                    target_text = x["target_text"]
-
-                    device = self.parameters().__next__().device
-                    text = text.to(device)
-                    target_text = target_text.to(device)
 
                     text = self.language_model.embeddings(text)
                     text = self.language_model.encoder(text)[0]
                     text = text[:, 0, :]
-                    self.texts = torch.cat((self.texts, text), dim=0)
-                    
-                    target_text = self.language_model.embeddings(target_text)
-                    target_text = self.language_model.encoder(target_text)[0]
-                    self.target_texts = torch.cat((self.target_texts, target_text), dim=0)
 
-                    self.labels = torch.cat((self.labels, x["label"].to(device)), dim=0)
+                    audio_self_similarity = F.cosine_similarity(audio, audio)
+                    # audio_self_similarity = 1 - torch.cosine_similarity(audio.unsqueeze(1), audio.unsqueeze(0), dim=2)
 
-                    if len(self.audios) > self.mem_size:
-                        # break
-                        index = torch.randperm(self.audios.shape[0])[:self.mem_size]
-                        self.audios = self.audios[index]
-                        self.target_audios = self.target_audios[index]
-                        self.texts = self.texts[index]
-                        self.target_texts = self.target_texts[index]
-                        self.labels = self.labels[index]
+                    text_self_similarity = F.cosine_similarity(text, text)
+                    # text_self_similarity = 1 - torch.cosine_similarity(text.unsqueeze(1), text.unsqueeze(0), dim=2)
+
+                    label = x["label"].to(self.parameters().__next__().device)
+
+                    positive_map = (label.unsqueeze(1) == label.unsqueeze(0)).float()
+                    # negative_map = (label.unsqueeze(1) != label.unsqueeze(0)).float()
+
+                    audio_contrastive_loss = ((audio_self_similarity * positive_map).sum() / (audio_self_similarity.sum() + 1e-8)).sum()
+                    text_contrastive_loss = ((text_self_similarity * positive_map).sum() / (text_self_similarity.sum() + 1e-8)).sum()
+
+                    contrastive_loss = audio_contrastive_loss + text_contrastive_loss
+                    contrastive_loss.backward()
+                    optimizer.step()
+
+                    print(f"audio_contrastive_loss: {audio_contrastive_loss.item():.4f}, text_contrastive_loss: {text_contrastive_loss.item():.4f}", end='\r')
                 print()
-                torch.save({"audios": self.audios, "target_audios": self.target_audios, "texts": self.texts, "target_texts": self.target_texts, "labels": self.labels}, "features.pt")
+            for name, param in self.audio_model.named_parameters():
+                param.requires_grad = False
+            for name, param in self.language_model.named_parameters():
+                param.requires_grad = False
+
+            
+            for n, x in enumerate(dataloader):
+                audio = x["audio"]
+                target_audio = x["target_audio"]
+                
+                audio = audio.to(device)
+                target_audio = target_audio.to(device)
+
+                audio = audio[:, 0, :]
+                audio = self.audio_model.processor(audio.squeeze(1), return_tensors="pt", sampling_rate=16000, padding=True).input_values.squeeze().to(device)
+                audio = self.audio_model.model.feature_extractor(audio)
+                audio = self.audio_model.model.feature_projection(audio.transpose(1, 2))
+                audio = self.audio_model.model.encoder(audio)[0]
+                audio = audio.mean(dim=1)
+                self.audios = torch.cat((self.audios, audio), dim=0)
+
+                target_audio = target_audio[:, 0, :]
+                target_audio = self.audio_model.processor(target_audio.squeeze(1), return_tensors="pt", sampling_rate=16000, padding=True).input_values.squeeze().to(device)
+                target_audio = self.audio_model.model.feature_extractor(target_audio)
+                target_audio = self.audio_model.model.feature_projection(target_audio.transpose(1, 2))
+                # target_audio = self.audio_model.model.encoder.pos_conv_embed(target_audio)
+                # target_audio = self.audio_model.model.encoder.layer_norm(target_audio)
+                # target_audio = self.audio_model.model.encoder.dropout(target_audio)
+                self.target_audios = torch.cat((self.target_audios, target_audio), dim=0)
+                text = x["text"]
+                target_text = x["target_text"]
+
+                device = self.parameters().__next__().device
+                text = text.to(device)
+                target_text = target_text.to(device)
+
+                text = self.language_model.embeddings(text)
+                text = self.language_model.encoder(text)[0]
+                text = text[:, 0, :]
+                self.texts = torch.cat((self.texts, text), dim=0)
+                
+                target_text = self.language_model.embeddings(target_text)
+                target_text = self.language_model.encoder(target_text)[0]
+                self.target_texts = torch.cat((self.target_texts, target_text), dim=0)
+
+                self.labels = torch.cat((self.labels, x["label"].to(device)), dim=0)
+
+                if len(self.audios) > self.mem_size:
+                    # break
+                    index = torch.randperm(self.audios.shape[0])[:self.mem_size]
+                    self.audios = self.audios[index]
+                    self.target_audios = self.target_audios[index]
+                    self.texts = self.texts[index]
+                    self.target_texts = self.target_texts[index]
+                    self.labels = self.labels[index]
+            print()
+            torch.save({"audios": self.audios, "target_audios": self.target_audios, "texts": self.texts, "target_texts": self.target_texts, "labels": self.labels}, "features.pt")
+
             # self.audios = torch.cat(self.audios, dim=0)
             # self.target_audios = torch.cat(self.target_audios, dim=0)
             # self.texts = torch.cat(self.texts, dim=0)
@@ -373,26 +358,46 @@ class Ours(nn.Module):
         self.audio_centroids = []
         self.audio_target_centriods = []
         self.audio_cluster = []
-        centroids, audio_cluster = self.k_means(self.target_audios.flatten(1), self.num_cluster)
-        self.audio_target_centriods.append(centroids.reshape(self.num_cluster, -1, 768))
-        for i, _ in enumerate(centroids):
-            audio_centroids = self.audios[audio_cluster==i].mean(dim=0)
-            self.audio_centroids.append(audio_centroids)
+        if self.class_wise:
+            for c in range(self.num_classes):
+                centroids, audio_cluster = self.k_means(self.audios[self.labels==c], self.num_cluster//self.num_classes)
+                self.audio_target_centriods.append(centroids.reshape(self.num_cluster//self.num_classes, -1, 768))
+                for i, _ in enumerate(centroids):
+                    audio_centroids = self.audios[self.labels==c][audio_cluster==i].mean(dim=0)
+                    self.audio_centroids.append(audio_centroids)
+                self.audio_cluster.append(audio_cluster + self.num_cluster // self.num_classes * c)
+        else:
+            centroids, audio_cluster = self.k_means(self.target_audios.flatten(1), self.num_cluster)
+            self.audio_target_centriods.append(centroids.reshape(self.num_cluster, -1, 768))
+            for i, _ in enumerate(centroids):
+                audio_centroids = self.audios[audio_cluster==i].mean(dim=0)
+                self.audio_centroids.append(audio_centroids)
+            self.audio_cluster = self.audio_cluster.append(audio_cluster)
         self.audio_centroids = torch.stack(self.audio_centroids, dim=0)
         self.audio_target_centriods = torch.cat(self.audio_target_centriods, dim=0)
-        self.audio_cluster = audio_cluster
+        self.audio_cluster = torch.cat(self.audio_cluster, dim=0)
 
         self.text_centroids = []
         self.text_target_centriods = []
         self.text_cluster = []
-        centroids, text_cluster = self.k_means(self.target_texts.flatten(1), self.num_cluster)
-        self.text_target_centriods.append(centroids.reshape(self.num_cluster, -1, 768))
-        for i, _ in enumerate(centroids):
-            text_centroids = self.texts[text_cluster==i].mean(dim=0)
-            self.text_centroids.append(text_centroids)
+        if self.class_wise:
+            for c in range(self.num_classes):
+                centroids, text_cluster = self.k_means(self.texts[self.labels==c], self.num_cluster//self.num_classes)
+                self.text_target_centriods.append(centroids.reshape(self.num_cluster//self.num_classes, -1, 768))
+                for i, _ in enumerate(centroids):
+                    text_centroids = self.texts[self.labels==c][text_cluster==i].mean(dim=0)
+                    self.text_centroids.append(text_centroids)
+                self.text_cluster.append(text_cluster + self.num_cluster // self.num_classes * c)
+        else:
+            centroids, text_cluster = self.k_means(self.target_texts.flatten(1), self.num_cluster)
+            self.text_target_centriods.append(centroids.reshape(self.num_cluster, -1, 768))
+            for i, _ in enumerate(centroids):
+                text_centroids = self.texts[text_cluster==i].mean(dim=0)
+                self.text_centroids.append(text_centroids)
+            self.text_cluster = self.text_cluster.append(text_cluster)
         self.text_centroids = torch.stack(self.text_centroids, dim=0)
         self.text_target_centriods = torch.cat(self.text_target_centriods, dim=0)
-        self.text_cluster = text_cluster
+        self.text_cluster = torch.cat(self.text_cluster, dim=0)
 
         print(audio_cluster.unique(return_counts=True)[1])
         print(text_cluster.unique(return_counts=True)[1])
@@ -439,6 +444,8 @@ class Ours(nn.Module):
         train_text = True
         epoch = 0
         while train_audio or train_text:
+            audio_key_matcher_optimizer.param_groups[0]['lr'] = 1e-3 #* 0.99 ** (epoch // 10)
+            text_key_matcher_optimizer.param_groups[0]['lr'] = 1e-3 #* 0.99 ** (epoch // 10)
             print(f"{epoch+1}")
             epoch += 1
             audio_key_matcher_optimizer.zero_grad()
@@ -446,7 +453,7 @@ class Ours(nn.Module):
             if train_audio:
                 audio_key = self.audio_key_matcher(self.audios)
                 audio_loss = F.cross_entropy(audio_key, self.audio_cluster)
-                audio_acc = (audio_key.argmax(dim=1) == audio_cluster).float().mean()
+                audio_acc = (audio_key.argmax(dim=1) == self.audio_cluster).float().mean()
                 audio_loss.backward()
                 audio_key_matcher_optimizer.step()
                 if audio_acc.item() > 0.95:
@@ -455,7 +462,7 @@ class Ours(nn.Module):
             if train_text:
                 text_key = self.text_key_matcher(self.texts)
                 text_loss = F.cross_entropy(text_key, self.text_cluster)
-                text_acc = (text_key.argmax(dim=1) == text_cluster).float().mean()
+                text_acc = (text_key.argmax(dim=1) == self.text_cluster).float().mean()
                 text_loss.backward()
                 text_key_matcher_optimizer.step()
                 if text_acc.item() > 0.95:
@@ -479,11 +486,11 @@ class Ours(nn.Module):
         print("audio_cluster", self.audio_cluster.shape)
         print("text_cluster", self.text_cluster.shape)
 
-        # self.audio_centroids = nn.Parameter(self.audio_centroids, requires_grad=True)
-        # self.audio_target_centriods = nn.Parameter(self.audio_target_centriods, requires_grad=True)
-        # # self.audio_text_centriods = nn.Parameter(self.audio_text_centriods)
-        # self.text_centroids = nn.Parameter(self.text_centroids, requires_grad=True)
-        # self.text_target_centriods = nn.Parameter(self.text_target_centriods, requires_grad=True)
+        self.audio_centroids = nn.Parameter(self.audio_centroids, requires_grad=True)
+        self.audio_target_centriods = nn.Parameter(self.audio_target_centriods, requires_grad=True)
+        # self.audio_text_centriods = nn.Parameter(self.audio_text_centriods)
+        self.text_centroids = nn.Parameter(self.text_centroids, requires_grad=True)
+        self.text_target_centriods = nn.Parameter(self.text_target_centriods, requires_grad=True)
         # self.text_audio_centriods = nn.Parameter(self.text_audio_centriods)
 
     def forward(self, x):
@@ -595,7 +602,7 @@ class Ours(nn.Module):
         #     text = torch.cat((text, target_text, target_audio_text), dim=1)
         # else:
         audio = torch.cat((audio, target_audio), dim=1)
-        # text = torch.cat((text, target_text), dim=1)
+        text = torch.cat((text, target_text), dim=1)
 
         audio = self.audio_model.model.encoder.pos_conv_embed(audio)
         audio = self.audio_model.model.encoder.layer_norm(audio)

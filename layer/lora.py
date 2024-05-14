@@ -8,8 +8,8 @@ class LoRA(nn.Module):
         super().__init__()
         self.register_buffer('W', torch.zeros(layer.weight.shape))
         self.register_buffer('b', torch.zeros(layer.bias.shape))
-        self.W = layer.weight.detach().clone()
-        self.b = layer.bias.detach().clone()
+        self.W = layer.weight.detach().clone().requires_grad_(False)
+        self.b = layer.bias.detach().clone().requires_grad_(False)
         self.rank = rank
         self.dim_in = layer.weight.shape[1]
         self.dim_out = layer.weight.shape[0]

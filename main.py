@@ -1,5 +1,5 @@
 import argparse
-from util.trainer import Trainer
+from utils.trainer import Trainer
 from warnings import filterwarnings
 
 def main():
