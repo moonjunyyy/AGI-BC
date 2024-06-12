@@ -1,3 +1,4 @@
+import torch.distributed as dist
 def get_audio_model(name):
     from model.hubert import HuBert
     from model.audio_lstm import Audio_LSTM
@@ -12,6 +13,14 @@ def get_audio_model(name):
     else:
         raise NotImplementedError
     return audio_model
+
+def get_video_model(name):
+    from model.video_mae import VideoMAE
+    if name == 'VideoMAE':
+        video_model = VideoMAE()
+    else:
+        raise NotImplementedError
+    return video_model
 
 def get_language_model(name):
     if name == 'koBert':
@@ -36,21 +45,12 @@ def get_language_model(name):
 def get_dataset(name, tokenizer):
     from torch.utils.data import Subset
     from dataset.SWBD_Dataset import SWBD_Dataset
-    from dataset.ETRI_Dataset import ETRI_Corpus_Dataset, ETRI_Generation_Dataset, ETRI_2022_Dataset, ETRI_2023_Dataset, ETRI_All_Dataset, ETRI_ALL_Client_Dataset, ETRI_All_Random_Testset_Dataset, ETRI_All_End_SampleMix_Dataset
-    from dataset.ETRI_Wrong_Target import ETRI_All_In_BC_Dataset, ETRI_All_Wrong_Target_Dataset
+    from dataset.ETRI_Dataset import ETRI_2022_Dataset, ETRI_2023_Dataset, ETRI_All_Dataset, ETRI_2022_Video_Dataset, ETRI_2023_Video_Dataset, ETRI_All_Video_Dataset
     if name == 'SWBD':
         dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, length=1.5)
         train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
         val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
         num_class = 3
-    elif name == 'ETRI':
-        train_dataset = ETRI_Corpus_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_Corpus_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
-    elif name == 'ETRI_GEN':
-        train_dataset = ETRI_Generation_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_Generation_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
     elif name == 'ETRI_2022':
         train_dataset = ETRI_2022_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
         val_dataset = ETRI_2022_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
@@ -63,25 +63,17 @@ def get_dataset(name, tokenizer):
         train_dataset = ETRI_All_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
         val_dataset = ETRI_All_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
         num_class = 4
-    elif name == 'ETRI_Client':
-        train_dataset = ETRI_ALL_Client_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_ALL_Client_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+    elif name == 'ETRI_2022_Video':
+        train_dataset = ETRI_2022_Video_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_2022_Video_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
         num_class = 4
-    elif name == 'ETRI_ALL_In_BC':
-        train_dataset = ETRI_All_In_BC_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_All_In_BC_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+    elif name == 'ETRI_2023_Video':
+        train_dataset = ETRI_2023_Video_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_2023_Video_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
         num_class = 4
-    elif name == 'ETRI_ALL_Wrong_Target':
-        train_dataset = ETRI_All_Wrong_Target_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_All_Wrong_Target_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
-    elif name == 'ETRI_ALL_Random_Testset':
-        train_dataset = ETRI_All_Random_Testset_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_All_Random_Testset_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
-    elif name == 'ETRI_All_End_SampleMix_Dataset':
-        train_dataset = ETRI_All_End_SampleMix_Dataset(path = '/data2/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_All_End_SampleMix_Dataset(path = '/data2/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+    elif name == 'ETRI_ALL_Video':
+        train_dataset = ETRI_All_Video_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
+        val_dataset = ETRI_All_Video_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
         num_class = 4
     else:
         NotImplementedError
@@ -91,27 +83,28 @@ def get_dataset(name, tokenizer):
 def get_backchannel_prediction_model(name):
     from model.bpm_mt import BPM_MT, BPM_ST, BPM_ST_Target, BPM_ST_Target_Token
     from model.ours import Ours
-    from model.adversarial import Adversarial
-    from model.deidentifier import Deidentifier
-    from model.identity_estimator import Identity_Estimator
     from model.lora import LoRA_BC
     from model.finetune import Finetune
     from model.contrastive_prototype import Contrastive_Prototype
     from model.Proxy_Prototype import Proxy_Prototype
+    from model.audio_text_video import Audio_Text_Video
+    from model.lora_selection import LoRASelection
+    from model.diffuse_backchannel import Diffused_Backchannel
+
     try:
         return {
+            'ATV' : Audio_Text_Video,
             'BPM_MT': BPM_MT,
             'BPM_ST': BPM_ST,
             'BPM_ST_Target': BPM_ST_Target,
             'BPM_ST_Target_Token': BPM_ST_Target_Token,
             'Ours': Ours,
-            'ADV' : Adversarial,
-            'Deidentifier' : Deidentifier,
-            'Identity_Estimator' : Identity_Estimator,
             'LoRA' : LoRA_BC,
             'Finetune' : Finetune,
             'Contrastive_Prototype' : Contrastive_Prototype,
-            'Proxy_Prototype' : Proxy_Prototype
+            'Proxy_Prototype' : Proxy_Prototype,
+            'lora_selection' : LoRASelection,
+            'Diffused_Backchannel' : Diffused_Backchannel
         }[name]
     except:
         raise NotImplementedError
@@ -168,3 +161,21 @@ def stretch_waveform(
         spec_stretch, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window, length=len_stretch
     )
     return waveform_stretch
+
+def all_gather(item, device='cuda'):
+    _device = item.device
+    item = item.to(device)
+    local_size = torch.tensor(item.size(), device=device)
+    all_sizes = [torch.empty_like(local_size) for _ in range(dist.get_world_size())]
+    dist.all_gather(all_sizes, local_size)
+    max_size = torch.max(torch.stack(all_sizes), dim=0).values
+    if (max_size > local_size).any():
+        item = item.to_padded_tensor(0.,max_size)
+    all_qs_padded = [torch.empty_like(item) for _ in range(dist.get_world_size())]
+    dist.all_gather(all_qs_padded, item)
+    all_qs = []
+    for q, size in zip(all_qs_padded, all_sizes):
+        for i in range(len(size)):
+            q = q.index_select(i, torch.arange(size[i], device=device))
+            all_qs.append(q)
+    return all_qs

@@ -1,3 +1,4 @@
+import gc
 import torch
 import time
 import pickle
@@ -9,7 +10,6 @@ import socket
 from torch import Tensor
 import multiprocessing as mp
 from typing import Callable, Tuple, Any, Sequence, List, Dict
-from utils.thread_with_return_value import Thread_With_Return_Value
 from utils.log import Log
 
 random.seed(int(time.time() * 1e6))
@@ -311,7 +311,7 @@ class Prefetcher:
                 worker.start()
                 self.ports.append(port) 
                 self.workers.append(worker)
-            except Exception as e: time.sleep(_sleep_time()); print(f"Error occured in Prefetcher : {e}"); continue;
+            except Exception as e: time.sleep(_sleep_time()); continue;
             if len(self.ports) == n_workers: break;
         self.batchsize = 0
         self._worker_cursor = 0
@@ -436,9 +436,6 @@ class Prefetcher:
         self.transform = transform
         self.n_iter = n_iter
         self.sampler = sampler
-        self.indices = list(self.sampler)
-        self.indices = [[self.indices[i:i+self.batchsize] for i in range(n * self.batchsize, len(self.indices), self.n_workers * self.batchsize)] for n in range(self.n_workers)]
-        _thread_and_wait(target=self.send_metadata, args=("set_metadata", (dataset, transform, self.indices[0], n_iter)))
     
     def _worker_num_generator(self):
         ret = self._worker_cursor
@@ -468,6 +465,9 @@ class Prefetcher:
         with self.output_lock: self.output_buffer.append(None)
 
     def __iter__(self):
+        self.indices = list(self.sampler)
+        self.indices = [[self.indices[i:i+self.batchsize] for i in range(n * self.batchsize, len(self.indices), self.n_workers * self.batchsize)] for n in range(self.n_workers)]
+        _thread_and_wait(target=self.send_metadata, args=("set_metadata", (self.dataset, self.transform, self.indices[0], self.n_iter)))
         self.fetch_thread = threading.Thread(target=self._fetch)
         self.fetch_thread.start()
         return _PrefetcherIterator(self)

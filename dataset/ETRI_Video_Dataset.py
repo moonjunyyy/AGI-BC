@@ -2,13 +2,14 @@ import os
 import math
 import logging
 import pandas as pd
+import decord
 from typing import Callable, Optional
 import torch
 from torch import Tensor
 import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import Dataset
-from util.knusl import KnuSL
+from utils.knusl import KnuSL
 from konlpy.tag import Okt 
 import gensim
 import random
@@ -126,19 +127,29 @@ class ETRI22_2S_Video_Generation_Dataset(Dataset):
         
 
         video_path = os.path.join(self.path, "video/front", f"{str(idx)}.mp4")
-        container = av.open(video_path)
-        indices = self.sample_frame_indices(clip_len=16, frame_sample_rate=1, seg_len=container.streams.video[0].frames)
-        video = self.read_video_pyav(container, indices)
+        video_reader = decord.VideoReader(video_path)
+        length = video_reader.get_length()
+        fps = video_reader.get_avg_fps()
+        indices = np.linspace(start=0, stop=int(fps*1.5), num=16, endpoint=False)
+        video = video_reader.get_batch(indices).asnumpy()
         video = video.transpose(0,3,1,2)
+        target_indices = np.linspace(start=length-int(fps*0.5), stop=length-1, num=8, endpoint=False)
+        target_video = video_reader.get_batch(target_indices).asnumpy()
+        target_video = target_video.transpose(0,3,1,2)
+
+        # container = av.open(video_path)
+        # indices = self.sample_frame_indices(clip_len=16, frame_sample_rate=1, seg_len=container.streams.video[0].frames)
+        # video = self.read_video_pyav(container, indices)
         
         
         ret['video'] = video
         ret['audio'] = audio
-    #    ret['target_audio'] = target_audio
         ret['label'] = label
         ret['text'] = trans
-    #    ret['target_text'] = target_trans
-    #    ret['sentiment'] = sentiment
+        ret['target_video'] = target_video
+        ret['target_audio'] = target_audio
+        ret['target_text'] = target_trans
+        ret['sentiment'] = sentiment
         return ret
    
     def get_sample_in_class(self):
@@ -224,7 +235,7 @@ class ETRI23_2S_Video_Generation_Dataset(Dataset):
         return len(self.dataframe)
     
     def __getitem__(self, index):
-        
+                
         ret = {}
 
         item = self.dataframe.iloc[index]
@@ -232,10 +243,10 @@ class ETRI23_2S_Video_Generation_Dataset(Dataset):
         trans = item['transcript']
         target_trans = item['back']
         label = item['BC']
-            
-        input_path = os.path.join(self.path, "audio/front", f"{str(idx)}.wav")
-        target_path = os.path.join(self.path, "audio/back", f"{str(idx)}.wav")
         
+        input_path = os.path.join(self.path, "audio/front", f"{str(idx)}.wav")
+        target_path = os.path.join(self.path, "audio/back", f"{str(idx)}.wav")    
+    
         audio, sr = torchaudio.load(input_path)
         audio = torchaudio.transforms.Resample(sr, 16000)(audio)
         sr = 16000
@@ -266,56 +277,51 @@ class ETRI23_2S_Video_Generation_Dataset(Dataset):
         trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
         target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
         
+
         video_path = os.path.join(self.path, "video/front", f"{str(idx)}.mp4")
-        container = av.open(video_path)
-        indices = self.sample_frame_indices(clip_len=16, frame_sample_rate=1, seg_len=container.streams.video[0].frames)
-        video = self.read_video_pyav(container, indices)
+        video_reader = decord.VideoReader(video_path)
+        length = video_reader.get_length()
+        fps = video_reader.get_avg_fps()
+        indices = np.linspace(start=0, stop=int(fps*1.5), num=16, endpoint=False)
+        video = video_reader.get_batch(indices).asnumpy()
         video = video.transpose(0,3,1,2)
+        target_indices = np.linspace(start=length-int(fps*0.5), stop=length-1, num=8, endpoint=False)
+        target_video = video_reader.get_batch(target_indices).asnumpy()
+        target_video = target_video.transpose(0,3,1,2)
+
+        # container = av.open(video_path)
+        # indices = self.sample_frame_indices(clip_len=16, frame_sample_rate=1, seg_len=container.streams.video[0].frames)
+        # video = self.read_video_pyav(container, indices)
+        
         
         ret['video'] = video
         ret['audio'] = audio
-    #    ret['target_audio'] = target_audio
         ret['label'] = label
         ret['text'] = trans
-    #    ret['target_text'] = target_trans
-    #    ret['sentiment'] = sentiment
+        ret['target_video'] = target_video
+        ret['target_audio'] = target_audio
+        ret['target_text'] = target_trans
+        ret['sentiment'] = sentiment
         return ret
    
     def get_sample_in_class(self):
-        return self.dataframe['BC'].value_counts().sort_index().to_numpy()    
-    
-    def sample_frame_indices(self, clip_len, frame_sample_rate, seg_len):
-        '''
-        Sample a given number of frame indices from the video.
-        Args:
-            clip_len (`int`): Total number of frames to sample.
-            frame_sample_rate (`int`): Sample every n-th frame.
-            seg_len (`int`): Maximum allowed index of sample's last frame.
-        Returns:
-            indices (`List[int]`): List of sampled frame indices
-        '''
-    #    converted_len = int(clip_len * frame_sample_rate) 
-    #    end_idx = np.random.randint(converted_len, seg_len) 
-    #    start_idx = end_idx - converted_len
-    #    indices = np.linspace(start_idx, end_idx, num=clip_len)
-    #    indices = np.clip(indices, start_idx, end_idx - 1).astype(np.int64)
-        indices = np.linspace(seg_len-46, seg_len-1, num=clip_len)
-        indices = np.clip(indices, seg_len-46, seg_len-1).astype(np.int64)
-        return indices
+        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
 
-    
-    def read_video_pyav(self, container, indices):
-        frames = []
-        container.seek(0)
-        start_index = indices[0]
-        end_index = indices[-1]
-        for i, frame in enumerate(container.decode(video=0)):
-            if i > end_index:
-                break
-            if i >= start_index and i in indices:
-                frames.append(frame)
+class ETRI_ALL_2S_Video_Dataset(Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
+        super().__init__()
+        print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI22_2S_Video_Generation_Dataset(path, tokenizer, train, balanced, length, predict_length)
+        self.dataset_2023 = ETRI23_2S_Video_Generation_Dataset(path, tokenizer, train, balanced, length, predict_length)
 
-        return np.stack([x.to_ndarray(format="rgb24") for x in frames])
+    def __len__(self):
+        return len(self.dataset_2022) + len(self.dataset_2023)
     
-
- 
+    def __getitem__(self, index):
+        if index < len(self.dataset_2022):
+            return self.dataset_2022[index]
+        else:
+            return self.dataset_2023[index - len(self.dataset_2022)]
+        
+    def get_sample_in_class(self):
+        return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()

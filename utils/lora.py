@@ -21,3 +21,4 @@ class LoRA(nn.Module):
         BAx = torch.mm(Ax, self.B.t())
         BAx = BAx * self.alpha
         return self.linear_layer(x) + BAx
+    

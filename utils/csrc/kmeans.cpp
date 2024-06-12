@@ -23,30 +23,30 @@ KMeans::fit(T&& X){
     for (int i = 0; i < this->max_iter; i++) {
         old_centroids.copy_(*this->centroids);
         this->update_labels(std::forward<T>(X)); this->update_centers(std::forward<T>(X));
-        if (old_centroids.equal(*this->centroids)) break;}}
+        if (old_centroids.equal(*this->centroids)) break;}
+        if (this->centroids->size(0) != this->n_clusters) {throw std::invalid_argument("!!! The number of clusters is not equal to n_clusters !!!");}}
 
 template <typename T>
 inline void
 KMeans::init_centers(T&& X){
-    try{
+    try {
         this->centroids = std::make_unique<torch::Tensor>(torch::empty({this->n_clusters, X.size(1)}, X.options()));
         this->labels    = std::make_unique<torch::Tensor>(torch::empty({X.size(0)}, X.options().dtype(torch::kInt64)));
         this->distances = std::make_unique<torch::Tensor>(torch::empty({X.size(0), this->n_clusters}, X.options()));
         this->mask      = std::make_unique<torch::Tensor>(torch::empty({X.size(0)}, X.options().dtype(torch::kBool)));
 
-    if (this->init_method == Random) *this->centroids = std::forward<T>(X)[torch::randperm(X.size(0)).slice(0, 0, this->n_clusters)];
-    else if (this->init_method == kMeansPP) {
-        this->centroids->index({0}) = X.index({torch::randint(X.size(0), {1}).template item<int>()}); // Choose the first centroid randomly
-        compute_distance_matrix_out(this->distances->slice(1,0,1,1), std::forward<T>(X), this->centroids->slice(0,0,1,1)); // Compute the distance matrix
-        auto min_dist = torch::empty({X.size(0)}, X.options());
-        auto min_idx = torch::empty({X.size(0)}, X.options().dtype(torch::kInt64));
-        for (int i = 1; i < this->n_clusters; i++) {
-            compute_distance_matrix_out(this->distances->slice(1,i-1,i,1), std::forward<T>(X), this->centroids->slice(0,i-1,i,1)); // Compute the distance matrix
-            torch::min_out(min_dist, min_idx, this->distances->slice(1,0,i,1), 1, false); // Get the minimum distance to the nearest centroid
-            min_dist += 1e-6;
-            this->centroids->index({i}) = X.index({(min_dist/min_dist.sum()).multinomial(1).template item<int>()}); // Choose the next centroid
-        }}
-    else throw std::invalid_argument("Invalid init method");}
+        if (this->init_method == Random) *this->centroids = std::forward<T>(X)[torch::randperm(X.size(0)).slice(0, 0, this->n_clusters)];
+        else if (this->init_method == kMeansPP) {
+            this->centroids->index({0}) = X.index({torch::randint(X.size(0), {1}).template item<int>()}); // Choose the first centroid randomly
+            compute_distance_matrix_out(this->distances->slice(1,0,1,1), std::forward<T>(X), this->centroids->slice(0,0,1,1)); // Compute the distance matrix
+            auto min_dist = torch::zeros({X.size(0)}, X.options()) + 1e-8;
+            auto min_idx = torch::empty({X.size(0)}, X.options().dtype(torch::kInt64));
+            for (int i = 0; i < (this->n_clusters - 1); i++) {
+                compute_distance_matrix_out(this->distances->slice(1,i,i+1,1), std::forward<T>(X), this->centroids->slice(0,i,i+1,1)); // Compute the distance matrix
+                torch::min_out(min_dist, min_idx, this->distances->slice(1,0,i+1,1), 1, false); // Get the minimum distance to the nearest centroid
+                this->centroids->index({i+1}) = X.index({(min_dist/min_dist.sum()).multinomial(1).template item<int>()}); // Choose the next centroid
+            }}
+        else {throw std::invalid_argument("Invalid init method");}}
     catch (std::exception &e) {printf("Error: %s\n", e.what());}}
 
 template <typename T>
@@ -87,7 +87,8 @@ template <typename T1, typename T2, typename T3>
 inline torch::Tensor&
 KMeans::compute_distance_matrix_out(T1&& Out, T2&& X, T3&& Y){
     torch::NoGradGuard no_grad;
-    for (int64_t i = 0; i < std::forward<T2>(X).size(0); i += this->batch_size) {
+    auto _x_size = std::forward<T2>(X).size(0);
+    for (int64_t i = 0; i < _x_size; i += this->batch_size) {
         this->pairwise_distance_out(Out.slice(0, i, i+this->batch_size, 1),
             std::forward<T2>(X).slice(0, i, i+this->batch_size, 1), std::forward<T3>(Y));
         }
@@ -99,7 +100,10 @@ inline torch::Tensor&
 KMeans::pairwise_distance(T1&& X, T2&& Y){
     if (this->dist_method == Euclidean) return torch::norm(std::forward<T1>(X).unsqueeze(1) - std::forward<T2>(Y).unsqueeze(0), 2, 2);
     else if (this->dist_method == Cosine) {
-        return 1 - torch::mm(std::forward<T1>(X), std::forward<T2>(Y).t()) / (torch::norm(std::forward<T1>(X), 2, 1).unsqueeze(1) * torch::norm(std::forward<T2>(Y), 2, 1).unsqueeze(0));}
+        auto norms_X = torch::norm(std::forward<T1>(X), 2, 1);
+        auto norms_Y = torch::norm(std::forward<T2>(Y), 2, 1);
+        auto cosine_sim = 1 - torch::clamp(torch::mm(std::forward<T1>(X), std::forward<T2>(Y).t()) / (norms_X * norms_Y.t()), -1.0, 1.0);
+        return cosine_sim;}
     else if (this->dist_method == Manhattan) return torch::norm(std::forward<T1>(X).unsqueeze(1) - std::forward<T2>(Y), 1, 2);
     else throw std::invalid_argument("Invalid distance method");
 }
@@ -109,10 +113,10 @@ inline torch::Tensor&
 KMeans::pairwise_distance_out(T1&& Out, T2&& X, T3&& Y){
     if (this->dist_method == Euclidean) torch::norm_out(Out, std::forward<T2>(X).unsqueeze(1) - std::forward<T3>(Y).unsqueeze(0), 2, 2);
     else if (this->dist_method == Cosine) {
-        auto norm_X = torch::norm(std::forward<T2>(X), 2, 1).unsqueeze(1) + 1e-8;
-        auto norm_Y = torch::norm(std::forward<T3>(Y), 2, 1).unsqueeze(0) + 1e-8;
-        torch::mm_out(Out, X, Y.t());
-        Out.div_(norm_X).div_(norm_Y).mul_(-1.).add_(1.);}
+        auto norms_X = torch::norm(std::forward<T2>(X), 2, 1);
+        auto norms_Y = torch::norm(std::forward<T3>(Y), 2, 1);
+        auto cosine_sim = 1 - torch::clamp(torch::mm(std::forward<T2>(X), std::forward<T3>(Y).t()) / (norms_X.unsqueeze(1) * norms_Y.unsqueeze(0)), -1.0, 1.0);
+        Out.copy_(cosine_sim);}
     else if (this->dist_method == Manhattan) torch::norm_out(Out, std::forward<T2>(X).unsqueeze(1) - std::forward<T3>(Y), 1, 2);
     else throw std::invalid_argument("Invalid distance method");
     return Out;
@@ -132,11 +136,11 @@ Kmeans_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 
 int Kmeans_init(KMeans *self, PyObject *args, PyObject *kwds){
     // Initialize the pointers to nullptr. Because the Python interpreter allocate memory WITHOUT calling the constructor.
-    if (self->centroids != nullptr) *(long *)&self->centroids = 0;
-    if (self->labels != nullptr) *(long *)&self->labels = 0;
-    if (self->distances != nullptr) *(long *)&self->distances = 0;
-    if (self->mask != nullptr) *(long *)&self->mask = 0;
-    
+    if (self->centroids != nullptr) *(long*)&(self->centroids)=0;
+    if (self->labels != nullptr) *(long*)&(self->labels)=0;
+    if (self->distances != nullptr) *(long*)&(self->distances)=0;
+    if (self->mask != nullptr) *(long*)&(self->mask)=0;
+
     PyObject *n_clusters=nullptr, *max_iter=nullptr, *batchsize=nullptr, *random_state=nullptr;
     char *init_method_str=nullptr, *dist_method_str=nullptr;
     const char* kwlist[] = {"n_clusters", "max_iter", "batchsize", "mode", "init", "seed", NULL};
@@ -208,6 +212,7 @@ fit_predict(KMeans *self, PyObject *args) {
     Py_XINCREF(X);
     auto ret = THPVariable_Wrap(self->fit_predict(THPVariable_Unpack(X)));
     Py_XDECREF(X);
+    Py_XINCREF(ret); // Return a new reference
     return ret;}
 
 PyObject *
@@ -217,6 +222,7 @@ predict(KMeans *self, PyObject *args) {
     Py_XINCREF(X);
     auto ret =  THPVariable_Wrap(self->predict(THPVariable_Unpack(X)));
     Py_XDECREF(X);
+    Py_XINCREF(ret); // Return a new reference
     return ret;}
 
 PyObject *
@@ -227,6 +233,7 @@ init_centers(KMeans *self, PyObject *args) {
     self->init_centers(THPVariable_Unpack(X));
     auto ret =  THPVariable_Wrap(*self->centroids);
     Py_XDECREF(X);
+    Py_XINCREF(ret); // Return a new reference
     return ret;}
 
 PyObject *
@@ -237,6 +244,7 @@ update_centers(KMeans *self, PyObject *args) {
     self->update_centers(THPVariable_Unpack(X));
     auto ret =  THPVariable_Wrap(*self->centroids);
     Py_XDECREF(X);
+    Py_XINCREF(ret); // Return a new reference
     return ret;}
 
 PyObject *
@@ -252,9 +260,10 @@ PyObject *
 compute_distance_matrix(KMeans *self, PyObject *args){
     PyObject *X, *Y;
     if (!PyArg_ParseTuple(args, "OO:compute_distance_matrix", &X, &Y)) return NULL;
-    Py_XINCREF(X);
+    Py_XINCREF(X); Py_XINCREF(Y);
     auto ret =  THPVariable_Wrap(self->compute_distance_matrix(THPVariable_Unpack(X), THPVariable_Unpack(Y)));
-    Py_XDECREF(X);
+    Py_XDECREF(X); Py_XDECREF(Y);
+    Py_XINCREF(ret); // Return a new reference
     return ret;}
 
 PyObject *

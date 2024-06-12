@@ -13,17 +13,17 @@ class KMeans:
     def compute_distance_matrix(self, X:torch.Tensor, Y:torch.Tensor)->torch.Tensor:...
     def get_centroids(self) -> torch.Tensor:...
 
-def __bootstrap__():
-   global __bootstrap__, __loader__, __file__
-   import sys, pkg_resources, imp
-   __file__ = pkg_resources.resource_filename(__name__,'kmeans.so')
-   __loader__ = None; del __bootstrap__, __loader__
-   imp.load_dynamic(__name__,__file__)
-__bootstrap__()
+# def __bootstrap__():
+#    global __bootstrap__, __loader__, __file__
+#    import sys, pkg_resources, imp
+#    __file__ = pkg_resources.resource_filename(__name__,'kmeans.so')
+#    __loader__ = None; del __bootstrap__, __loader__
+#    imp.load_dynamic(__name__,__file__)
+# __bootstrap__()
 
-# # import kmeans
-# if not os.path.exists('./utils/csrc/build'): os.makedirs('./utils/csrc/build');
-# from torch.utils.cpp_extension import load
-# kmeans = load(name='kmeans', sources=['./utils/csrc/kmeans.cpp'], is_python_module=True, build_directory='./utils/csrc/build', with_cuda=True);
-# sys.modules['kmeans'] = kmeans;
-# KMeans = kmeans.KMeans;
+# import kmeans
+if not os.path.exists('./utils/csrc/build'): os.makedirs('./utils/csrc/build');
+from torch.utils.cpp_extension import load
+kmeans = load(name='kmeans', sources=['./utils/csrc/kmeans.cpp'], is_python_module=True, build_directory='./utils/csrc/build', with_cuda=True);
+sys.modules['kmeans'] = kmeans;
+KMeans = kmeans.KMeans;

@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from utils.utils import get_dataset, get_audio_model,\
-     get_language_model, get_backchannel_prediction_model
+     get_language_model, get_backchannel_prediction_model, get_video_model
 from utils.criterions import get_criterion
 from utils.koalpaca import KoAlpaca
 from utils.prefetcher import Prefetcher
@@ -40,6 +40,7 @@ class Trainer:
         self.is_MT = args.is_MT
         self.language = args.language
         self.audio = args.audio
+        self.video = args.video
         self.weight_decay = args.weight_decay
 
         self.master_addr = os.environ.get("MASTER_ADDR", "localhost")
@@ -65,6 +66,11 @@ class Trainer:
             os.environ["MASTER_ADDR"] = "localhost"
         if os.environ.get("MASTER_PORT") is None:
             os.environ["MASTER_PORT"] = "8888"
+        print(f"world_size: {self.world_size}, rank: {self.rank}, ngpus_per_node: {self.ngpus_per_node}, distributed: {self.distributed}")
+
+        tokenizer, _ = get_language_model(self.language)
+        _ = get_audio_model(self.audio)
+        self.train_dataset, self.val_dataset, self.num_class = get_dataset(self.dataset, tokenizer)
 
     def run(self):
         if self.distributed:
@@ -77,6 +83,7 @@ class Trainer:
         self.rank = self.rank * self.ngpus_per_node + rank
         self.world_size = world_size
 
+        print("world_size: ", self.world_size)
         self.init_distributed()
         if self.seed is not None:
             random.seed(self.seed)
@@ -91,19 +98,24 @@ class Trainer:
                 'which can slow down your training considerably! '
                 'You may see unexpected behavior when restarting '
                 'from checkpoints.')
-        
+        print(f"rank {self.rank} is running...")
 
-        tokenizer, language_model = get_language_model(self.language)
-        audio_model = get_audio_model(self.audio)
+        if self.language is not None:
+            _, language_model = get_language_model(self.language)
+        if self.audio is not None:
+            audio_model = get_audio_model(self.audio)
+        if self.video is not None:
+            video_model = get_video_model(self.video)
 
-        self.train_dataset, self.val_dataset, self.num_class = get_dataset(self.dataset, tokenizer)    
-        self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset, shuffle=True, num_replicas=self.world_size, rank=self.rank)
-        self.val_sampler = torch.utils.data.distributed.DistributedSampler(self.val_dataset, shuffle=False, num_replicas=self.world_size, rank=self.rank)
-        # self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
-        # self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers)
-        self.train_dataloader = Prefetcher(self.num_workers, name='train')
-        self.val_dataloader = Prefetcher(self.num_workers, name='val')
-
+        self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset, shuffle=True, num_replicas=self.world_size, rank=self.rank, drop_last=True)
+        self.val_sampler = torch.utils.data.distributed.DistributedSampler(self.val_dataset, shuffle=False, num_replicas=self.world_size, rank=self.rank, drop_last=True)
+        self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
+        self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers) 
+        # self.train_dataloader = Prefetcher(self.num_workers, name='train')
+        # self.val_dataloader = Prefetcher(self.num_workers, name='val')
+        # self.train_dataloader.load(self.train_dataset, None, self.batch_size, sampler=self.train_sampler)
+        # self.val_dataloader.load(self.val_dataset, None, int(self.batch_size*1.5), sampler=self.val_sampler)
+        print(f"rank {self.rank} is running...")
 
         if self.model == 'BPM_MT':
             self.is_MT = True
@@ -122,62 +134,9 @@ class Trainer:
         if self.distributed:
             self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.local_rank], output_device=self.local_rank, find_unused_parameters=True)
 
-        # Get the model parameters divided into two groups : bert and others
         bert_params = []
         other_params = []
-        discriminator_params = []
         prompt_params = []
-
-        # self.model.eval()
-        # audio_features = []
-        # labels = []
-        # with torch.no_grad():
-        #     for i, batch in enumerate(self.train_dataloader):
-        #         for key in batch:
-        #             batch[key] = batch[key].to(self.local_rank)
-        #         audio_features.append(self.model.audio_model(batch["target_audio"]).detach().cpu())
-        #         labels.append(batch["label"].detach().cpu())
-        #     audio_features = torch.cat(audio_features, dim=0)
-        #     labels = torch.cat(labels, dim=0)
-        # audio_features = audio_features.reshape(audio_features.shape[0], -1)
-        # audio_features = audio_features / audio_features.norm(dim=1, keepdim=True)
-        # audio_features = audio_features.detach().cpu().numpy()
-        # audio_features = TSNE(n_components=2).fit_transform(audio_features)
-        # for i in range(self.num_class):
-        #     plt.scatter(audio_features[labels == i, 0], audio_features[labels == i, 1], label=i, s=1)
-        # plt.savefig(f'audio_features.png')
-        # plt.clf()
-        # exit()
-        
-        # bert_params = []
-        # other_params = []
-        # for name, param in self.model.named_parameters():
-        #     if 'language_model' in name or 'audio_model' in name:
-        #         bert_params.append(param)
-        #     elif 'prompt' in name:
-        #         prompt_params.append(param)
-        #     else:
-        #         other_params.append(param)
-
-        # adam_optimizer = torch.optim.Adam(other_params, lr=5e-4, weight_decay=self.weight_decay)
-        # sgd_optimizer = torch.optim.SGD(bert_params, lr=5e-4)
-        # if prompt_params != []:
-        #     adam_optimizer.add_param_group({'params': prompt_params, 'lr': 0.0001, 'weight_decay': self.weight_decay})
-        # optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay)
-        # optimizer = torch.optim.Adam(self.bert_params.parameters(), lr=2e-6, weight_decay=self.weight_decay)
-        # optimizer.add_param_group({'params': self.other_params.parameters(), 'lr': 1e-4, 'weight_decay': self.weight_decay})
-        # optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
-
-        # generator_params = []
-        # discriminator_params = []
-        # for name, param in self.model.named_parameters():
-        #     if 'generator' in name:
-        #         generator_params.append(param)
-        #     elif 'discriminator' in name:
-        #         discriminator_params.append(param)
-        
-        # discriminator_optimizer = torch.optim.Adam(discriminator_params, lr=1e-4, weight_decay=self.weight_decay)
-        # generator_optimizer = torch.optim.Adam(generator_params, lr=1e-4, weight_decay=self.weight_decay)
 
         self.pretext_epoch = 100
         self.model.train()
@@ -188,8 +147,8 @@ class Trainer:
         except Exception as e:
             print(e)
             print('No pretrained model')
-            if hasattr(self.model_without_ddp, 'pretext_forward'):
-                self.model_without_ddp.pretext_forward(self.train_dataloader)
+            if hasattr(self.model_without_ddp, 'pretext_task'):
+                self.model_without_ddp.pretext_task(self.train_dataloader)
                 self.train_sampler.epoch += 1
                 torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
                 sys.stdout.flush()
@@ -207,16 +166,13 @@ class Trainer:
             else:
                 other_params.append(param)
                 
-        # optimizer = torch.optim.Adam(other_params, lr=1e-4, weight_decay=self.weight_decay)
-        # optimizer.add_param_group({'params': bert_params, 'lr': 1e-4})
-        optimizer = torch.optim.Adam(other_params, lr=5e-5, weight_decay=self.weight_decay)
-        optimizer.add_param_group({'params': bert_params, 'lr': 5e-5})
-        # optimizer = torch.optim.Adam(self.model.parameters(), lr=2e-6, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(other_params, lr=2e-5, weight_decay=self.weight_decay)
+        optimizer.add_param_group({'params': bert_params, 'lr': 2e-5})
         
         for epoch in range(self.epochs):
+            self.model.train()
             # self.train_sampler.set_epoch(epoch)
             if hasattr(self.model_without_ddp, 'pre_epoch'):
-                self.train_dataloader.load(self.train_dataset, None, self.batch_size*4, sampler=self.train_sampler)
                 self.model_without_ddp.pre_epoch(self.train_dataloader)
                 self.train_sampler.epoch += 1
 
@@ -226,9 +182,7 @@ class Trainer:
             train_loss = 0
             count = 0
 
-            self.train_dataloader.load(self.train_dataset, None, self.batch_size, sampler=self.train_sampler)
             for b, batch in enumerate(self.train_dataloader):
-                
                 # print(batch['identity'].max())
                 # print(batch['identity'].min())
                 # continue
@@ -238,7 +192,7 @@ class Trainer:
                 # print(f"load data {self.rank} : {time.time() - start}"); start = time.time()
 
                 y = self.model.forward(batch)
-                
+
                 loss = 0
                 if 'logit' in y.keys():
                     loss, logit = self.criteria(batch, y)
@@ -258,31 +212,27 @@ class Trainer:
                     loss = loss + 0.5 * y['identity'].mean()
                 if 'contrastive_loss' in y.keys():
                     loss = loss + 0.5 * y['contrastive_loss'].mean()
+                if "audio_key_loss" in y.keys():
+                    loss = loss + 0.1 * y["audio_key_loss"]
+                if "text_key_loss" in y.keys():
+                    loss = loss + 0.1 * y["text_key_loss"]
                 if self.is_MT:
                     loss = 0.9 * loss + 0.1 * F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
-
-                # print(f"forward {self.rank} : {time.time() - start}"); start = time.time()
+                if 'audio' in y.keys():
+                    loss = loss + y['audio']
+                if 'text' in y.keys():
+                    loss = loss + y['text']
+                if 'video' in y.keys():
+                    loss = loss + y['video']
 
                 # Zero the gradients
                 optimizer.zero_grad()
-                # sgd_optimizer.zero_grad()
-                # adam_optimizer.zero_grad()
-                # Backpropagation
                 loss.backward()
-                # print(f"backward {self.rank} : {time.time() - start}"); start = time.time()
-                # max_grad_ = 0
-                # for name, param in self.model.named_parameters():
-                #     if param.grad is not None:
-                #         max_grad_ = max(max_grad_, param.grad.abs().max().item())
-                # print(max_grad_)
-                # Update the model parameters
                 optimizer.step()
-                # print(f"step {self.rank} : {time.time() - start}"); start = time.time()
-                # sgd_optimizer.step()
-                # adam_optimizer.step()
                 gc.collect()
                 print(f"Epoch : {epoch}, {b}/{len(self.train_dataloader)}, Loss : {loss.item():.6f}, Acc : {accuracy.item()*100:.3f}", end='\r')
             print(flush=True)
+            gc.collect()
             self.train_sampler.epoch += 1
             train_acc /= count
             train_loss /= count
@@ -298,7 +248,6 @@ class Trainer:
                 label = []
                 pred = []
 
-                self.val_dataloader.load(self.val_dataset, None, self.batch_size * 2, sampler=self.val_sampler)
                 for i, batch in enumerate(self.val_dataloader):
                     print(f"Validation {i}/{len(self.val_dataloader)}", end='\r')
                     # Move the batch to GPU if CUDA is available
@@ -383,11 +332,10 @@ class Trainer:
                         p = pred == p
                         print(f"{(a & p).sum().item():5d}", end=' ')
                     print()
-                
-                if hasattr(self.model_without_ddp, 'post_epoch'):
-                    self.val_dataloader.load(self.val_dataset, None, self.batch_size * 2, sampler=self.val_sampler)
-                    self.model_without_ddp.post_epoch(self.val_dataloader)
-                sys.stdout.flush()
+            
+            if hasattr(self.model_without_ddp, 'post_epoch'):
+                self.model_without_ddp.post_epoch(self.val_dataloader)
+            sys.stdout.flush()
             gc.collect()
         
     def init_distributed(self):

@@ -30,3 +30,28 @@ class LoRA(nn.Module):
         BAx = Ax @ self.lora_b
         BAx = BAx * self.lora_scale
         return Wx + BAx + self.b
+
+class SelectionLoRA(nn.Module):
+    def __init__(self, linear_layer:nn.Linear, num_loras, rank:int=4, alpha:float=1.0):
+        super(SelectionLoRA, self).__init__()
+        self.num_loras = num_loras
+        self.alpha = alpha
+        self.linear_layer = linear_layer
+        self.A = nn.Parameter(torch.randn(self.num_loras, self.linear_layer.in_features, rank))
+        self.B = nn.Parameter(torch.randn(self.num_loras, self.linear_layer.out_features, rank))
+        self.selection = None
+    
+    def set_selection(self, selection):
+        self.selection = selection
+    
+    def forward(self, x):
+        B, N, D = x.size()
+        assert D == self.linear_layer.in_features
+        ret = self.linear_layer(x)
+        if self.selection is not None:
+            assert self.selection.size(0) == B
+            Ax  = torch.bmm(x, self.A[self.selection].clone())
+            BAx = torch.bmm(Ax, self.B[self.selection].clone().transpose(1, 2))
+            BAx = BAx * self.alpha
+            ret = ret + BAx
+        return ret
