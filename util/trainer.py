@@ -201,11 +201,13 @@ class Trainer:
                 # Zero the gradients
                 b_optimizer.zero_grad()
                 o_optimizer.zero_grad()
+                f_optimizer.zero_grad()
                 # Backpropagation
                 loss.backward()
                 # Update the model parameters
                 b_optimizer.step()
                 o_optimizer.step()
+                f_optimizer.step()
                 
             loss     /= len(self.warmup_dataset)
             sec = time.time() - start
@@ -307,11 +309,13 @@ class Trainer:
                 # Zero the gradients
                 b_optimizer.zero_grad()
                 o_optimizer.zero_grad()
+                f_optimizer.zero_grad()
                 # Backpropagation
                 loss.backward()
                 # Update the model parameters
                 b_optimizer.step()
                 o_optimizer.step()
+                f_optimizer.step()           
                 
                 if self.verbose:    
                     print("Epoch : {}, {}/{},  Loss : {:.6f}, {:.6f}, {:.6f}, Acc : {:.3f}".format(epoch, b+1, len(self.train_dataloader), loss.item(), ce_loss, cosine_loss, accuracy.item()*100))#, end='\r')
