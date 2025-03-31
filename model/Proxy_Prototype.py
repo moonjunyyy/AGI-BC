@@ -4,8 +4,9 @@ import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
 from itertools import permutations
-from utils.utils import get_audio_model, get_language_model, all_gather
-from utils.kmeans import KMeans
+from utils.utils import get_audio_model, get_language_model
+from M00NNY_Utils.kmeans import KMeans
+from M00NNY_Utils.sharded_modules import all_gather, all_reduce
 from layer.lora import LoRA
 from layer.cross_attention_layer import CrossAttentionLayer
 from layer.self_attention_layer import SelfAttentionLayer
@@ -41,9 +42,6 @@ class Proxy_Prototype(nn.Module):
             # if bert and vocab are not provided, raise an error
             assert self.language_model is not None, "bert and vocab must be provided"
 
-        self.sentiment_dict = sentiment_dict
-        self.is_MT = self.sentiment_dict is not None
-
         if audio_model is not None:
             self.register_module("audio_model", audio_model)
             # define the LSTM layer, 4 of layers
@@ -53,6 +51,8 @@ class Proxy_Prototype(nn.Module):
             self.register_module("video_model", video_model)
             self.video_feature_size = video_model.get_feature_size()
 
+        self.sentiment_dict = sentiment_dict
+        self.is_MT = self.sentiment_dict is not None
         self.cross_attention_layer = nn.ModuleList([CrossAttentionLayer(768, 4, 0.5) for _ in range(12)])
 
         self.language_linear = nn.ModuleDict()

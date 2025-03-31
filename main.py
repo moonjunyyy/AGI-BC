@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--dropout', type=float, default=0.3)
-    parser.add_argument('--weight_decay', type=float, default=1e-3)
+    parser.add_argument('--weight_decay', type=float, default=1e-2)
     parser.add_argument('--verbose', action='store_true', default=False)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--num_workers', type=int, default=4)
@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--dist_url', type=str, default='tcp://')
     parser.add_argument('--mode', type=str, default='cross_entropy')
     parser.add_argument('--path', type=str, default='save path')
+    parser.add_argument('--data_path', type=str, default='/local_datasets')
     args = parser.parse_args()
 
     trainer = Trainer(args)

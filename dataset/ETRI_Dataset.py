@@ -1,243 +1,206 @@
 import os
-import math
-import logging
-import asyncio
-import threading
+import gc
 import subprocess
 import pandas as pd
-from typing import Callable, Optional
 import torch
-import numpy as np
-from torch import Tensor
 import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import Dataset
-from utils.knusl import KnuSL
-from utils.threads import Thread_With_Return_Value
-import decord
-from decord import AudioReader, cpu, gpu
-from decord.bridge import bridge_out
+from dataclasses import dataclass
 from utils.wavfile import WavFile
 from utils.mp4file import Mp4File
-decord.bridge._GLOBAL_BRIDGE_TYPE = 'torch'
+from M00NNY_Utils.threads import Thread_With_Return_Value
 
-folder_list = [
-    "220918_남정희_김우진",
-    "220918_남정희_백보경",
-    "220918_남정희_손석규",
-    "220918_남정희_정정연",
-    "220918_남정희_차지수",
-    "220920_강명진_오주현",
-    "220920_강명진_윤수진",
-    "220920_강명진_정은영",
-    "220920_강명진_조주현",
-    "220922_강명진_오은숙",
-    "220922_강명진_정준호",
-    "220922_강주영_강태랑",
-    "220922_강주영_김은영",
-    "220922_강주영_이준혁",
-    "220922_강주영_정유림",
-    "220922_강주영_최보규",
-    "220925_남정희_김민석",
-    "220925_남정희_박종길",
-    "220925_남정희_서지원",
-    "220925_남정희_서혜연",
-    "220925_남정희_이주왕",
-    "220925_남정희_장은태",
-    "220925_남정희_한성민",
-    "220925_남정희_허세민",
-    "220929_강명진_김민수",
-    "220929_강명진_김정현",
-    "220929_강명진_류호정",
-    "220929_강명진_유채이",
-    "220929_강주영_김영미",
-    "220929_강주영_류서영",
-    "220929_강주영_송선희",
-    "220929_강주영_임지윤",
-    "221006_윤지선_박일용",
-    "221006_윤지선_안수진",
-    "221006_윤지선_용금여",
-    "221006_윤지선_임현숙",
-    "221006_윤지선_조영현",
-    "221006_윤지선_채원석",
-    "221006_윤지선_최주희",
-    "220918_남정희_김지수",
-]     
-
-class ETRI_2022_Dataset(Dataset):
-    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
+class ETRI_Dataset(Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16) -> None:
         super().__init__()
-        print("Load ETRI_2022_Dataset...")
         self.tokenizer = tokenizer
-        self.path = os.path.join(path, "etri2022_whole")
-        if os.path.isdir(self.path) == False:
-            print("Copy etri2022_whole.zip")
-            import shutil
-            import zipfile
-            shutil.copy("/data/datasets/etri2022_whole.zip", path)
-            zipfile.ZipFile(f"{path}/etri2022_whole.zip").extractall(path)
-            shutil.rmtree(f"{path}/etri2022_whole.zip", ignore_errors=True)
+        self.path = path
         self.train = train
         self.length = length
         self.predict_length = predict_length
         self.balanced = balanced
-        if self.balanced and not self.train:
-            logging.warning("The balance is only for training dataset")
+        self.sample_rate = sample_rate
+        self.num_frames = num_frames
 
-        self.dataframe = pd.read_csv(os.path.join(self.path, "annotation.tsv"), sep='\t', index_col=0)
-        # self.dataframe = self.dataframe.assign(filename=range(len(self.dataframe)))
+    def _load_data(self, zip_file, tsv_file):
+        if os.path.isdir(self.path) == False:
+            print(f"Copy {zip_file}")
+            subprocess.run(["cp", f"/data/datasets/{zip_file}", self.path])
+            subprocess.run(["unzip", f"{self.path}/{zip_file}", "-d", self.path])
+            subprocess.run(["rm", "-rf", f"{self.path}/{zip_file}"])
+        self.path = os.path.join(self.path, zip_file.split(".")[0])
+        self.dataframe = pd.read_csv(os.path.join(self.path, tsv_file), sep='\t', index_col=0)
         trainset = self.dataframe.sample(frac=0.8, random_state=42)
         if self.train:
             self.dataframe = trainset
         else:
             self.dataframe = self.dataframe.drop(trainset.index)
-        # print(self.dataframe)
-        
+        if self.balanced:
+            bc_num = self.dataframe['BC'].value_counts().sort_index().to_numpy()
+            bc_num = min(bc_num[0], bc_num[1:].sum())
+            self.dataframe = pd.concat([self.dataframe[self.dataframe['BC'] == 0].sample(bc_num, replace=False, random_state=42)] + [self.dataframe[self.dataframe['BC'] != 0].sample(bc_num, replace=False, random_state=42)])
+
+    def _load_audio(self):
         self.audios = {}
-        for filename in self.dataframe['folder'].unique():
+        def _load(filename): return WavFile(os.path.join(self.path, "audio", f"{filename}.wav"))
+        counselor = {}
+        client = {}
+        for idx, filename in enumerate(self.dataframe['folder'].unique()):
+            counselor[filename] = Thread_With_Return_Value(daemon=True, target=_load, args=(f"{filename}_counselor",))
+            client[filename] = Thread_With_Return_Value(daemon=True, target=_load, args=(f"{filename}_client",))
+            counselor[filename].start()
+            client[filename].start()
+        for key in set(list(counselor.keys()) + list(client.keys())):
             try:
-                self.audios[filename +"_counselor"] = WavFile(os.path.join(self.path, "audio", f"{filename}_counselor.wav"))
-                self.audios[filename +"_client"] = WavFile(os.path.join(self.path, "audio", f"{filename}_client.wav"))
-            except:
-                print(f"{filename} is not found")
-                self.dataframe = self.dataframe[self.dataframe['folder'] != filename]
-        print(f"ETRI 2023 Dataset {self.train} {self.balanced} :")
-        print(self.dataframe['BC'].value_counts().sort_index())
+                _counselor = counselor[key].join()
+                _client = client[key].join()
+                if _counselor is None or _client is None: raise Exception
+                self.audios[key+"_counselor"] = _counselor
+                self.audios[key+"_client"] = _client
+            except Exception as e:
+                print(e)
+                print(f"Audio : {key} is not found")
+                self.dataframe = self.dataframe[self.dataframe['folder'] != key]
+                counselor.pop(key, None)
+                client.pop(key, None)
+
+    def _load_video(self):
+        self.videos = {}
+        def _load(filename): return Mp4File(os.path.join(self.path, "video", f"{filename}.mp4"))
+        counselor = {}
+        client = {}
+        for idx, filename in enumerate(self.dataframe['folder'].unique()):
+            counselor[filename] = Thread_With_Return_Value(daemon=True, target=_load, args=(f"{filename}_counselor",))
+            client[filename] = Thread_With_Return_Value(daemon=True, target=_load, args=(f"{filename}_client",))
+            counselor[filename].start()
+            client[filename].start()
+        for key in set(list(counselor.keys()) + list(client.keys())):
+            try:
+                _counselor = counselor[key].join()
+                _client = client[key].join()
+                if _counselor is None or _client is None: raise Exception
+                self.videos[key+"_counselor"] = _counselor
+                self.videos[key+"_client"] = _client
+            except Exception as e:
+                print(f"Video : {filename} is not found")
+                self.dataframe = self.dataframe[self.dataframe['folder'] != key]
+                counselor.pop(key, None)
+                client.pop(key, None)
+        del counselor, client
 
     def __len__(self):
         return len(self.dataframe)
     
-    def __get_audio__(self, name, start, end):
-        audio = self.audios[name][start:end]
+    def __get_audio__(self, name, time, length):
+        if length < 0: start_time = time + length; end_time = time;
+        else: start_time = time; end_time = time + length;
+        start_frame = int(start_time * self.audios[name].sample_rate)
+        end_frame = int(end_time * self.audios[name].sample_rate)
+        if start_frame < 0: start_frame = 0
+        if end_frame > len(self.audios[name]): end_frame = len(self.audios[name])
+        audio = self.audios[name][start_frame:end_frame]
         audio = torch.tensor(audio)
-        audio = torchaudio.transforms.Resample(16000, 16000)(audio)
-        if audio.shape[1] != int(self.length * 16000):
-            audio = F.pad(audio, (0, int(16000 * self.length) - audio.size(1)), "constant", 0)
+        audio = torchaudio.transforms.Resample(self.audios[name].sample_rate, self.sample_rate)(audio)
+        length = length if length > 0 else -length
+        audio = audio[:, -int(self.sample_rate * length):]
+        if audio.shape[1] < int(self.sample_rate * length):
+            audio = F.pad(audio, (int(self.sample_rate * length) - audio.shape[1], 0), "constant", 0)
         return audio
+    
+    def __get_video__(self, name, time, length):
+        if length < 0: start_time = time + length; end_time = time;
+        else: start_time = time; end_time = time + length;
+        start_frame = int(start_time * self.videos[name].frame_rate)
+        end_frame = int(end_time * self.videos[name].frame_rate)
+        if start_frame <= 0: start_frame = 1
+        if end_frame >= len(self.videos[name]): end_frame = len(self.videos[name]) - 1
+        video = self.videos[name][tuple([int(start_frame+((end_frame-start_frame)*i)/self.num_frames) for i in range(self.num_frames)])]
+        video = torch.tensor(video)
+        video = video.permute(0, 3, 1, 2)
+        video = F.interpolate(video, (224, 224), mode='bilinear')
+        return video
+
+    def get_sample_in_class(self):
+        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
+    
+class ETRI_2022_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_2022_Dataset...")
+        self._load_data("etri2022_whole.zip", "annotation.tsv")
+        self._load_audio()
+        if verbose:
+            print(f"ETRI_2022_Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.dataframe['BC'].value_counts().sort_index())
+            total_len = len(self.dataframe) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
     
     def __getitem__(self, index):
         ret = {}
-
         item = self.dataframe.iloc[index]
-        sample_rate = self.audios[item['folder']+'_'+item['role']].sample_rate
-        trans = item['transcript']
-        target_trans = item['back']
-        time = int(item['bc_start']*sample_rate)
-        length = int(self.length*sample_rate)
-        predict_length = int(self.predict_length*sample_rate)
-
-        audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+item['role'], time-length, time), name="audio"); audio.start()
-        if item['BC'] == 0:
-            target_audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), time, time+predict_length), name="target_audio"); target_audio.start()
-        else:
-            target_audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), time, time+predict_length), name="target_audio"); target_audio.start()
-        trans = Thread_With_Return_Value(target=self.tokenizer, args=(trans,), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(target=self.tokenizer, args=(target_trans,), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
-
-        # trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
-        # target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()        
+        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
         ret['label'] = item['BC']
-        ret['text'] = trans.join()['input_ids'].squeeze()
-        ret['target_text'] = target_trans.join()['input_ids'].squeeze()
-
+        trans = trans.join()
+        ret['text'] = trans['input_ids'].squeeze()
+        ret['text_attention_mask'] = trans['attention_mask'].squeeze()
+        ret['text_token_type_ids'] = trans['token_type_ids'].squeeze()
+        target_trans = target_trans.join()
+        ret['target_text'] = target_trans['input_ids'].squeeze()
+        ret['target_text_attention_mask'] = target_trans['attention_mask'].squeeze()
+        ret['target_text_token_type_ids'] = target_trans['token_type_ids'].squeeze()
         return ret
     
-    def get_sample_in_class(self):
-        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
-    
-class ETRI_2023_Dataset(Dataset):
-    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
-        super().__init__()
-        print("Load ETRI_2023_Dataset...")
-        self.tokenizer = tokenizer
-        self.path = os.path.join(path, "etri2023_whole")
-        if os.path.isdir(self.path) == False:
-            print("Copy etri2023_whole.zip")
-            import shutil
-            import zipfile
-            
-            shutil.copy("/data/datasets/etri2023_whole.zip", path)
-            zipfile.ZipFile(f"{path}/etri2023_whole.zip").extractall(path)
-            shutil.rmtree(f"{path}/etri2023_whole.zip", ignore_errors=True)
-        self.train = train
-        self.length = length
-        self.predict_length = predict_length
-        self.balanced = balanced
-        if self.balanced and not self.train:
-            logging.warning("The balance is only for training dataset")
-
-        self.dataframe = pd.read_csv(os.path.join(self.path, "annotation.tsv"), sep='\t', index_col=0)
-        trainset = self.dataframe.sample(frac=0.8, random_state=42)
-        if self.train:
-            self.dataframe = trainset
-        else:
-            self.dataframe = self.dataframe.drop(trainset.index)
-
-        self.audios = {}
-        for filename in self.dataframe['folder'].unique():
-            try:
-                self.audios[filename +"_counselor"] = WavFile(os.path.join(self.path, "audio", f"{filename}_counselor.wav"))
-                self.audios[filename +"_client"] = WavFile(os.path.join(self.path, "audio", f"{filename}_client.wav"))
-            except:
-                print(f"{filename} is not found")
-                self.dataframe = self.dataframe[self.dataframe['folder'] != filename]
-
-        print(f"ETRI 2023 Dataset {self.train} {self.balanced} :")
-        print(self.dataframe['BC'].value_counts().sort_index())
-    
-    def __len__(self):
-        return len(self.dataframe)
-    
-    def __get_audio__(self, name, start, end):
-        audio = self.audios[name][start:end]
-        audio = torch.tensor(audio)
-        audio = torchaudio.transforms.Resample(16000, 16000)(audio)
-        if audio.shape[1] != int(self.length * 16000):
-            audio = F.pad(audio, (0, int(16000 * self.length) - audio.size(1)), "constant", 0)
-        return audio
+class ETRI_2023_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_2023_Dataset...")
+        self._load_data("etri2023_whole.zip", "annotation.tsv")
+        self._load_audio()
+        if verbose:
+            print(f"ETRI 2023 Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.dataframe['BC'].value_counts().sort_index())
+            total_len = len(self.dataframe) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
     
     def __getitem__(self, index):
         ret = {}
-
         item = self.dataframe.iloc[index]
-        sample_rate = self.audios[item['folder']+'_'+item['role']].sample_rate
-        trans = item['transcript']
-        target_trans = item['back']
-        time = int(item['bc_start']*sample_rate)
-        length = int(self.length*sample_rate)
-        predict_length = int(self.predict_length*sample_rate)
-
-        audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+item['role'], time-length, time), name="audio"); audio.start()
-        if item['BC'] == 0:
-            target_audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), time, time+predict_length), name="target_audio"); target_audio.start()
-        else:
-            target_audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), time, time+predict_length), name="target_audio"); target_audio.start()
-        trans = Thread_With_Return_Value(target=self.tokenizer, args=(trans,), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(target=self.tokenizer, args=(target_trans,), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
-
-        # trans = self.tokenizer(trans, padding='max_length', max_length=20, truncation=True, return_tensors="pt")['input_ids'].squeeze()
-        # target_trans = self.tokenizer(target_trans, padding='max_length', max_length=5, truncation=True, return_tensors="pt")['input_ids'].squeeze()
+        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
         ret['label'] = item['BC']
-        ret['text'] = trans.join()['input_ids'].squeeze()
-        ret['target_text'] = target_trans.join()['input_ids'].squeeze()
-
+        trans = trans.join()
+        ret['text'] = trans['input_ids'].squeeze()
+        ret['text_attention_mask'] = trans['attention_mask'].squeeze()
+        ret['text_token_type_ids'] = trans['token_type_ids'].squeeze()
+        target_trans = target_trans.join()
+        ret['target_text'] = target_trans['input_ids'].squeeze()
+        ret['target_text_attention_mask'] = target_trans['attention_mask'].squeeze()
+        ret['target_text_token_type_ids'] = target_trans['token_type_ids'].squeeze()
         return ret
     
-    def get_sample_in_class(self):
-        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
-    
-class ETRI_All_Dataset(Dataset):
-    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
-        super().__init__()
-        print("Load ETRI_Corpus_Dataset...")
-        self.dataset_2022 = ETRI_2022_Dataset(path, tokenizer, train, balanced, length, predict_length)
-        self.dataset_2023 = ETRI_2023_Dataset(path, tokenizer, train, balanced, length, predict_length)
+class ETRI_All_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI_2022_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        self.dataset_2023 = ETRI_2023_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        if verbose:
+            print(f"ETRI ALL Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.get_sample_in_class())
+            total_len = len(self.dataset_2022) * self.length + len(self.dataset_2023) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
 
     def __len__(self):
         return len(self.dataset_2022) + len(self.dataset_2023)
@@ -251,213 +214,105 @@ class ETRI_All_Dataset(Dataset):
     def get_sample_in_class(self):
         return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()
     
-class ETRI_2022_Video_Dataset(Dataset):
-    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
-        super().__init__()
-        print("Load ETRI_2022_Dataset...")
-        self.tokenizer = tokenizer
-        self.path = os.path.join(path, "etri2022_whole")
-        if os.path.isdir(self.path) == False:
-            print("Copy etri2022_whole.zip")
-            subprocess.run(["cp", "/data/datasets/etri2022_whole.zip", path])
-            subprocess.run(["unzip", f"{path}/etri2022_whole.zip", "-d", path])
-            subprocess.run(["rm", "-rf", f"{path}/etri2022_whole.zip"])
-        self.train = train
-        self.length = length
-        self.predict_length = predict_length
-        self.balanced = balanced
-        if self.balanced and not self.train:
-            logging.warning("The balance is only for training dataset")
-
-        self.dataframe = pd.read_csv(os.path.join(self.path, "annotation.tsv"), sep='\t', index_col=0)
-        trainset = self.dataframe.sample(frac=0.8, random_state=42)
-        if self.train:
-            self.dataframe = trainset
-        else:
-            self.dataframe = self.dataframe.drop(trainset.index)
-
-        self.videos = {}
-        for filename in self.dataframe['folder'].unique():
-            try:
-                self.videos[filename +"_counselor"] = Mp4File(os.path.join(self.path, "video", f"{filename}_counselor.mp4"))
-                self.videos[filename +"_client"] = Mp4File(os.path.join(self.path, "video", f"{filename}_client.mp4"))
-            except:
-                print(f"{filename} is not found")
-                self.dataframe = self.dataframe[self.dataframe['folder'] != filename]
-        self.audios = {}
-        for filename in self.dataframe['folder'].unique():
-            try:
-                self.audios[filename +"_counselor"] = WavFile(os.path.join(self.path, "audio", f"{filename}_counselor.wav"))
-                self.audios[filename +"_client"] = WavFile(os.path.join(self.path, "audio", f"{filename}_client.wav"))
-            except:
-                print(f"{filename} is not found")
-                self.dataframe = self.dataframe[self.dataframe['folder'] != filename]
-
-        print(f"ETRI 2022 Dataset {self.train} {self.balanced} :")
-        print(self.dataframe['BC'].value_counts().sort_index())
-
-    def __len__(self):
-        return len(self.dataframe)
-    
-    def __get_audio__(self, name, start, end):
-        audio = self.audios[name][start:end]
-        audio = torch.tensor(audio)
-        audio = torchaudio.transforms.Resample(16000, 16000)(audio)
-        if audio.shape[1] != int(self.length * 16000):
-            audio = F.pad(audio, (0, int(16000 * self.length) - audio.size(1)), "constant", 0)
-        return audio
-    
-    def __get_video__(self, name, start, end):
-        video = self.videos[name][tuple([int(start+((end-start)*i)/16) for i in range(16)])]
-        video = torch.tensor(video)
-        video = video.permute(0, 3, 1, 2)
-        video = F.interpolate(video, (224, 224), mode='bilinear')
-        return video
+class ETRI_2022_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_2022_Dataset...")
+        self._load_data("etri2022_whole.zip", "annotation.tsv")
+        self._load_audio()
+        self._load_video()
+        if verbose:
+            print(f"ETRI_2022_Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.dataframe['BC'].value_counts().sort_index())
+            total_len = len(self.dataframe) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
     
     def __getitem__(self, index):
         ret = {}
-
         item = self.dataframe.iloc[index]
-        sample_rate = self.audios[item['folder']+'_'+item['role']].sample_rate
-
-        a_time = int(item['bc_start']*sample_rate)
-        a_length = int(self.length*sample_rate)
-        a_predict_length = int(self.predict_length*sample_rate)
-
-        v_time = int(item['bc_start']*self.videos[item['folder']+'_'+item['role']].frame_rate)
-        v_length = int(self.length*self.videos[item['folder']+'_'+item['role']].frame_rate)
-        v_predict_length = int(self.predict_length*self.videos[item['folder']+'_'+item['role']].frame_rate)
-
-        audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+item['role'], a_time-a_length, a_time), name="audio"); audio.start()
-        video = Thread_With_Return_Value(target=self.__get_video__, args=(item['folder']+'_'+item['role'], v_time-v_length, v_time), name="video"); video.start()
         if item['BC'] == 0:
-            target_audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), a_time, a_time+a_predict_length), name="target_audio"); target_audio.start()
-            target_video = Thread_With_Return_Value(target=self.__get_video__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), v_time, v_time+v_predict_length), name="target_video"); target_video.start()
+            audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="audio"); audio.start()
+            video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="video"); video.start()
+            target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_audio"); target_audio.start()
+            target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_video"); target_video.start()
         else:
-            target_audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), a_time, a_time+a_predict_length), name="target_audio"); target_audio.start()
-            target_video = Thread_With_Return_Value(target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), v_time, v_time+v_predict_length), name="target_video"); target_video.start()
-        trans = Thread_With_Return_Value(target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+            audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+            video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
+            target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+            target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
+        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
         ret['video'] = video.join()
         ret['target_video'] = target_video.join()
-        ret['text'] = trans.join()['input_ids'].squeeze()
-        ret['target_text'] = target_trans.join()['input_ids'].squeeze()
+        trans = trans.join()
+        ret['text'] = trans['input_ids'].squeeze()
+        ret['text_attention_mask'] = trans['attention_mask'].squeeze()
+        ret['text_token_type_ids'] = trans['token_type_ids'].squeeze()
+        target_trans = target_trans.join()
+        ret['target_text'] = target_trans['input_ids'].squeeze()
+        ret['target_text_attention_mask'] = target_trans['attention_mask'].squeeze()
+        ret['target_text_token_type_ids'] = target_trans['token_type_ids'].squeeze()
         ret['label'] = item['BC']
-
         return ret
     
-    def get_sample_in_class(self):
-        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
-    
-class ETRI_2023_Video_Dataset(Dataset):
-    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
-        super().__init__()
-        print("Load ETRI_2023_Dataset...")
-        self.tokenizer = tokenizer
-        self.path = os.path.join(path, "etri2023_whole")
-        if os.path.isdir(self.path) == False:
-            print("Copy etri2023_whole.zip")
-            subprocess.run(["cp", "/data/datasets/etri2023_whole.zip", path])
-            subprocess.run(["unzip", f"{path}/etri2023_whole.zip", "-d", path])
-            subprocess.run(["rm", "-rf", f"{path}/etri2023_whole.zip"])
-        self.train = train
-        self.length = length
-        self.predict_length = predict_length
-        self.balanced = balanced
-        if self.balanced and not self.train:
-            logging.warning("The balance is only for training dataset")
+class ETRI_2023_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_2023_Dataset...")
+        self._load_data("etri2023_whole.zip", "annotation.tsv")
+        self._load_audio()
+        self._load_video()
+        if verbose:
+            print(f"ETRI 2023 Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.dataframe['BC'].value_counts().sort_index())
+            total_len = len(self.dataframe) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
 
-        self.dataframe = pd.read_csv(os.path.join(self.path, "annotation.tsv"), sep='\t', index_col=0)
-        trainset = self.dataframe.sample(frac=0.8, random_state=42)
-        if self.train:
-            self.dataframe = trainset
-        else:
-            self.dataframe = self.dataframe.drop(trainset.index)
-
-        self.videos = {}
-        for filename in self.dataframe['folder'].unique():
-            try:
-                self.videos[filename +"_counselor"] = Mp4File(os.path.join(self.path, "video", f"{filename}_counselor.mp4"))
-                self.videos[filename +"_client"] = Mp4File(os.path.join(self.path, "video", f"{filename}_client.mp4"))
-            except:
-                print(f"{filename} is not found")
-                self.dataframe = self.dataframe[self.dataframe['folder'] != filename]
-        self.audios = {}
-        for filename in self.dataframe['folder'].unique():
-            try:
-                self.audios[filename +"_counselor"] = WavFile(os.path.join(self.path, "audio", f"{filename}_counselor.wav"))
-                self.audios[filename +"_client"] = WavFile(os.path.join(self.path, "audio", f"{filename}_client.wav"))
-            except:
-                print(f"{filename} is not found")
-                self.dataframe = self.dataframe[self.dataframe['folder'] != filename]
-
-        print(f"ETRI 2023 Dataset {self.train} {self.balanced} :")
-        print(self.dataframe['BC'].value_counts().sort_index())
-
-    def __len__(self):
-        return len(self.dataframe)
-        
-    def __get_audio__(self, name, start, end):
-        audio = self.audios[name][start:end]
-        audio = torch.tensor(audio)
-        audio = torchaudio.transforms.Resample(16000, 16000)(audio)
-        if audio.shape[1] != int(self.length * 16000):
-            audio = F.pad(audio, (0, int(16000 * self.length) - audio.size(1)), "constant", 0)
-        return audio
-    
-    def __get_video__(self, name, start, end):
-        video = self.videos[name][tuple([int(start+((end-start)*i)/16) for i in range(16)])]
-        video = torch.tensor(video)
-        video = video.permute(0, 3, 1, 2)
-        video = F.interpolate(video, (224, 224), mode='bilinear')
-        return video
-    
     def __getitem__(self, index):
         ret = {}
-
         item = self.dataframe.iloc[index]
-        sample_rate = self.audios[item['folder']+'_'+item['role']].sample_rate
-        a_time = int(item['bc_start']*sample_rate)
-        a_length = int(self.length*sample_rate)
-        a_predict_length = int(self.predict_length*sample_rate)
-
-        v_time = int(item['bc_start']*self.videos[item['folder']+'_'+item['role']].frame_rate)
-        v_length = int(self.length*self.videos[item['folder']+'_'+item['role']].frame_rate)
-        v_predict_length = int(self.predict_length*self.videos[item['folder']+'_'+item['role']].frame_rate)
-
-        audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+item['role'], a_time-a_length, a_time), name="audio"); audio.start()
-        video = Thread_With_Return_Value(target=self.__get_video__, args=(item['folder']+'_'+item['role'], v_time-v_length, v_time), name="video"); video.start()
         if item['BC'] == 0:
-            target_audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), a_time, a_time+a_predict_length), name="target_audio"); target_audio.start()
-            target_video = Thread_With_Return_Value(target=self.__get_video__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), v_time, v_time+v_predict_length), name="target_video"); target_video.start()
+            audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="audio"); audio.start()
+            video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="video"); video.start()
+            target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_audio"); target_audio.start()
+            target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_video"); target_video.start()
         else:
-            target_audio = Thread_With_Return_Value(target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), a_time, a_time+a_predict_length), name="target_audio"); target_audio.start()
-            target_video = Thread_With_Return_Value(target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), v_time, v_time+v_predict_length), name="target_video"); target_video.start()
-        trans = Thread_With_Return_Value(target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+            audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+            video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
+            target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+            target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
+        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
         ret['video'] = video.join()
         ret['target_video'] = target_video.join()
-        ret['text'] = trans.join()['input_ids'].squeeze()
-        ret['target_text'] = target_trans.join()['input_ids'].squeeze()
+        trans = trans.join()
+        ret['text'] = trans['input_ids'].squeeze()
+        ret['text_attention_mask'] = trans['attention_mask'].squeeze()
+        ret['text_token_type_ids'] = trans['token_type_ids'].squeeze()
+        target_trans = target_trans.join()
+        ret['target_text'] = target_trans['input_ids'].squeeze()
+        ret['target_text_attention_mask'] = target_trans['attention_mask'].squeeze()
+        ret['target_text_token_type_ids'] = target_trans['token_type_ids'].squeeze()
         ret['label'] = item['BC']
-
         return ret
     
-    def get_sample_in_class(self):
-        return self.dataframe['BC'].value_counts().sort_index().to_numpy()
-    
-class ETRI_All_Video_Dataset(Dataset):
-    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:
-        super().__init__()
-        print("Load ETRI_Corpus_Dataset...")
-        self.dataset_2022 = ETRI_2022_Video_Dataset(path, tokenizer, train, balanced, length, predict_length)
-        self.dataset_2023 = ETRI_2023_Video_Dataset(path, tokenizer, train, balanced, length, predict_length)
+class ETRI_All_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI_2022_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        self.dataset_2023 = ETRI_2023_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        if verbose:
+            print(f"ETRI ALL Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.get_sample_in_class())
+            total_len = len(self.dataset_2022) * self.length + len(self.dataset_2023) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
 
     def __len__(self):
         return len(self.dataset_2022) + len(self.dataset_2023)
@@ -468,5 +323,377 @@ class ETRI_All_Video_Dataset(Dataset):
         else:
             return self.dataset_2023[index - len(self.dataset_2022)]
         
+    def get_sample_in_class(self):
+        return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()
+    
+class ETRI_2022_TT_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_2022_Dataset...")
+        self._load_data("etri2022_whole.zip", "annotation_tt.tsv")
+        self._load_audio()
+        self._load_video()
+        if verbose:
+            print(f"ETRI_2022_Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.dataframe['BC'].value_counts().sort_index())
+            total_len = len(self.dataframe) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
+
+    def __getitem__(self, index):
+        ret = {}
+        item = self.dataframe.iloc[index]
+        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+        video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
+        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+        target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
+        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+
+        ret['audio'] = audio.join()
+        ret['target_audio'] = target_audio.join()
+        ret['video'] = video.join()
+        ret['target_video'] = target_video.join()
+        trans = trans.join()
+        ret['text'] = trans['input_ids'].squeeze()
+        ret['text_attention_mask'] = trans['attention_mask'].squeeze()
+        ret['text_token_type_ids'] = trans['token_type_ids'].squeeze()
+        target_trans = target_trans.join()
+        ret['target_text'] = target_trans['input_ids'].squeeze()
+        ret['target_text_attention_mask'] = target_trans['attention_mask'].squeeze()
+        ret['target_text_token_type_ids'] = target_trans['token_type_ids'].squeeze()
+        ret['label'] = item['BC']
+        return ret
+    
+class ETRI_2023_TT_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_2023_Dataset...")
+        self._load_data("etri2023_whole.zip", "annotation_tt.tsv")
+        self._load_audio()
+        self._load_video()
+        if verbose:
+            print(f"ETRI 2023 Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.dataframe['BC'].value_counts().sort_index())
+            total_len = len(self.dataframe) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
+    
+    def __getitem__(self, index):
+        ret = {}
+        item = self.dataframe.iloc[index]
+        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+        video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
+        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+        target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
+        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+
+        ret['audio'] = audio.join()
+        ret['target_audio'] = target_audio.join()
+        ret['video'] = video.join()
+        ret['target_video'] = target_video.join()
+        trans = trans.join()
+        ret['text'] = trans['input_ids'].squeeze()
+        ret['text_attention_mask'] = trans['attention_mask'].squeeze()
+        ret['text_token_type_ids'] = trans['token_type_ids'].squeeze()
+        target_trans = target_trans.join()
+        ret['target_text'] = target_trans['input_ids'].squeeze()
+        ret['target_text_attention_mask'] = target_trans['attention_mask'].squeeze()
+        ret['target_text_token_type_ids'] = target_trans['token_type_ids'].squeeze()
+        ret['label'] = item['BC']
+        return ret
+    
+class ETRI_All_TT_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI_2022_TT_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        self.dataset_2023 = ETRI_2023_TT_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        if verbose:
+            print(f"ETRI ALL Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.get_sample_in_class())
+            total_len = len(self.dataset_2022) * self.length + len(self.dataset_2023) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
+
+    def __len__(self):
+        return len(self.dataset_2022) + len(self.dataset_2023)
+    
+    def __getitem__(self, index):
+        if index < len(self.dataset_2022):
+            return self.dataset_2022[index]
+        else:
+            return self.dataset_2023[index - len(self.dataset_2022)]
+        
+    def get_sample_in_class(self):
+        return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()
+
+@dataclass
+class ETRI_Threashold:
+    thresholds = {
+        "220918_남정희_손석규":	1979.022,
+        "220922_강주영_강태랑":	1868.511,
+        "220929_강명진_김정현":	1953.196,
+        "221006_윤지선_조영현":	1538.848,
+        "1ST":	2643.797,
+        "6ST":	2254.096,
+        "11ST":	2093.002,
+        "16ST":	2488.419,
+        }
+    
+class ETRI_2022_Dialog_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=False, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose=True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_2022_Dataset...")
+        self._load_data("etri2022_whole.zip", "words.tsv")
+
+        # 필요한 변수 초기화
+        transcripts = []
+        folder_list = []
+        role_list = []
+        end_times = []
+        role_change = []
+
+        # 5단어를 담을 리스트와 현재 role을 추적하는 변수
+        current_transcript = []
+        current_role = None
+        current_folder = None
+
+        # DataFrame을 순차적으로 탐색
+        for i, row in self.dataframe.iterrows():
+            if row['folder'] in ETRI_Threashold.thresholds: continue
+            # 현재 row의 역할과 비교하여 현재 역할이 동일하면 계속 추가
+            if current_role is None or row['role'] == current_role and row['folder'] == current_folder:
+                current_transcript.append(row['transcript'])
+                current_role = row['role']
+                current_folder = row['folder']
+                current_end_time = row['end']
+            else:
+                # 5단어씩 슬라이딩 윈도우로 끊어서 저장
+                for j in range(0, len(current_transcript) - 4 if len(current_transcript) > 4 else 1):
+                    transcripts.append(' '.join(current_transcript[j:j + 5]))
+                    folder_list.append(current_folder)
+                    role_list.append(current_role)
+                    end_times.append(current_end_time)
+                    role_change.append(False)
+                role_change[-1] = True
+                
+                # 새로운 역할로 초기화
+                current_transcript = [row['transcript']]
+                current_role = row['role']
+                current_folder = row['folder']
+                current_end_time = row['end']
+
+        # 마지막으로 남은 transcript 처리 (5단어씩 슬라이딩 윈도우로 끊어서 저장)
+        if current_transcript:
+            for j in range(0, len(current_transcript), 5):
+                transcripts.append(' '.join(current_transcript[j:j + 5]))
+                folder_list.append(current_folder)
+                role_list.append(current_role)
+                end_times.append(current_end_time)
+                role_change.append(False)
+            role_change[-1] = True
+
+        # 최종 DataFrame 생성
+        self.dataframe = pd.DataFrame({
+            'transcript': transcripts,
+            'folder': folder_list,
+            'role': role_list,
+            'role_change': role_change,
+            'time': end_times
+        })
+
+        self._load_audio()
+        self._load_video()
+        if verbose:
+            print(f"ETRI_2022_Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            total_len = len(self.dataframe) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
+
+    def __getitem__(self, index):
+        ret = {}
+        item = self.dataframe.iloc[index]
+        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="audio"); audio.start()
+        video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="video"); video.start()
+        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], self.predict_length), name="target_audio"); target_audio.start()
+
+        ret['audio'] = audio.join()
+        ret['video'] = video.join()
+        trans = trans.join()
+        ret['text'] = trans['input_ids'].squeeze()
+        ret['text_attention_mask'] = trans['attention_mask'].squeeze()
+        ret['text_token_type_ids'] = trans['token_type_ids'].squeeze()
+        ret['target_audio'] = target_audio.join()
+        return ret
+
+class ETRI_2023_Dialog_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=False, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose = True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_2023_Dataset...")
+        self._load_data("etri2023_whole.zip", "words.tsv")
+
+        # 필요한 변수 초기화
+        transcripts = []
+        folder_list = []
+        role_list = []
+        end_times = []
+        role_change = []
+
+        # 5단어를 담을 리스트와 현재 role을 추적하는 변수
+        current_transcript = []
+        current_role = None
+        current_folder = None
+
+        # DataFrame을 순차적으로 탐색
+        for i, row in self.dataframe.iterrows():
+            if row['folder'] in ETRI_Threashold.thresholds: continue
+            # 현재 row의 역할과 비교하여 현재 역할이 동일하면 계속 추가
+            if current_role is None or row['role'] == current_role and row['folder'] == current_folder:
+                current_transcript.append(row['transcript'])
+                current_role = row['role']
+                current_folder = row['folder']
+                current_end_time = row['end']
+            else:
+                # 5단어씩 슬라이딩 윈도우로 끊어서 저장
+                for j in range(0, len(current_transcript) - 4 if len(current_transcript) > 4 else 1):
+                    transcripts.append(' '.join(current_transcript[j:j + 5]))
+                    folder_list.append(current_folder)
+                    role_list.append(current_role)
+                    end_times.append(current_end_time)
+                    role_change.append(False)
+                role_change[-1] = True
+                
+                # 새로운 역할로 초기화
+                current_transcript = [row['transcript']]
+                current_role = row['role']
+                current_folder = row['folder']
+                current_end_time = row['end']
+
+        # 마지막으로 남은 transcript 처리 (5단어씩 슬라이딩 윈도우로 끊어서 저장)
+        if current_transcript:
+            for j in range(0, len(current_transcript), 5):
+                transcripts.append(' '.join(current_transcript[j:j + 5]))
+                folder_list.append(current_folder)
+                role_list.append(current_role)
+                end_times.append(current_end_time)
+                role_change.append(False)
+            role_change[-1] = True
+
+        # 최종 DataFrame 생성
+        self.dataframe = pd.DataFrame({
+            'transcript': transcripts,
+            'folder': folder_list,
+            'role': role_list,
+            'role_change': role_change,
+            'time': end_times
+        })
+
+        self._load_audio()
+        self._load_video()
+
+        if verbose:
+            print(f"ETRI_2023_Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            total_len = len(self.dataframe) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
+
+    def __getitem__(self, index):
+        ret = {}
+        item = self.dataframe.iloc[index]
+        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="audio"); audio.start()
+        video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="video"); video.start()
+        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], self.predict_length), name="target_audio"); target_audio.start()
+        
+        ret['audio'] = audio.join()
+        ret['video'] = video.join()
+        trans = trans.join()
+        ret['text'] = trans['input_ids'].squeeze()
+        ret['text_attention_mask'] = trans['attention_mask'].squeeze()
+        ret['text_token_type_ids'] = trans['token_type_ids'].squeeze()
+        ret['target_audio'] = target_audio.join()
+        return ret
+    
+class ETRI_All_Dialog_Video_Dataset(ETRI_Dataset):
+    def __init__(self, path, tokenizer, train = False, balanced=False, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16, verbose = True) -> None:
+        super().__init__(path=path, tokenizer=tokenizer, train=train, balanced=balanced, length=length, predict_length=predict_length, sample_rate=sample_rate, num_frames=num_frames)
+        if verbose: print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI_2022_Dialog_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, verbose=False)
+        self.dataset_2023 = ETRI_2023_Dialog_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, verbose=False)
+        if verbose:
+            print(f"ETRI ALL Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            total_len = len(self.dataset_2022) * self.length + len(self.dataset_2023) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
+
+    def __len__(self):
+        return len(self.dataset_2022) + len(self.dataset_2023)
+    
+    def __getitem__(self, index):
+        if index < len(self.dataset_2022):
+            return self.dataset_2022[index]
+        else:
+            return self.dataset_2023[index - len(self.dataset_2022)]
+
+class ETRI_Threshold_Dataset(ETRI_Dataset):
+    def _load_data(self, zip_file, tsv_file):
+        if os.path.isdir(self.path) == False:
+            print(f"Copy {zip_file}")
+            subprocess.run(["cp", f"/data/datasets/{zip_file}", self.path])
+            subprocess.run(["unzip", f"{self.path}/{zip_file}", "-d", self.path])
+            subprocess.run(["rm", "-rf", f"{self.path}/{zip_file}"])
+        self.path = os.path.join(self.path, zip_file.split(".")[0])
+        self.dataframe = pd.read_csv(os.path.join(self.path, tsv_file), sep='\t', index_col=0)
+
+        mask_in_keys = self.dataframe['folder'].isin(ETRI_Threashold.thresholds.keys())
+        thresholds = self.dataframe['folder'].map(ETRI_Threashold.thresholds)
+        # thresholds = thresholds.fillna(0)
+
+        mask_to_keep = (~mask_in_keys) | (self.dataframe['bc_start'] < thresholds)
+        trainset = self.dataframe[mask_to_keep]
+        if self.train: self.dataframe = trainset
+        else: self.dataframe = self.dataframe.drop(trainset.index)
+
+        if self.balanced:
+            bc_num = self.dataframe['BC'].value_counts().sort_index().to_numpy()
+            bc_num = min(bc_num[0], bc_num[1:].sum())
+            self.dataframe = pd.concat([self.dataframe[self.dataframe['BC'] == 0].sample(bc_num, replace=False, random_state=42)] + [self.dataframe[self.dataframe['BC'] != 0].sample(bc_num, replace=False, random_state=42)])
+
+class ETRI_2022_Threshold_Video_Dataset(ETRI_Threshold_Dataset, ETRI_2022_Video_Dataset): pass
+class ETRI_2023_Threshold_Video_Dataset(ETRI_Threshold_Dataset, ETRI_2023_Video_Dataset): pass
+class ETRI_All_Threshold_Video_Dataset(ETRI_Threshold_Dataset):
+    def __init__(self, path, tokenizer, train=False, balanced=True, length = 1.5, predict_length = 0.5, sample_rate=16000, num_frames=16, verbose=True) -> None:
+        super().__init__(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames)
+        if verbose: print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI_2022_Threshold_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        self.dataset_2023 = ETRI_2023_Threshold_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        if verbose:
+            print(f"ETRI ALL Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.get_sample_in_class())
+            total_len = len(self.dataset_2022) * self.length + len(self.dataset_2023) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
+    def __len__(self):
+        return len(self.dataset_2022) + len(self.dataset_2023)
+    def __getitem__(self, index):
+        if index < len(self.dataset_2022): return self.dataset_2022[index]
+        else: return self.dataset_2023[index - len(self.dataset_2022)]
+    def get_sample_in_class(self):
+        return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()
+    
+class ETRI_2022_TT_Threshold_Video_Dataset(ETRI_Threshold_Dataset, ETRI_2022_TT_Video_Dataset): pass
+class ETRI_2023_TT_Threshold_Video_Dataset(ETRI_Threshold_Dataset, ETRI_2023_TT_Video_Dataset): pass
+class ETRI_All_TT_Threshold_Video_Dataset(ETRI_Threshold_Dataset):
+    def __init__(self, path, tokenizer, train=False, balanced=True, length = 1.5, predict_length = 0.5, sample_rate=16000, num_frames=16, verbose=True) -> None:
+        super().__init__(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames)
+        if verbose: print("Load ETRI_Corpus_Dataset...")
+        self.dataset_2022 = ETRI_2022_TT_Threshold_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        self.dataset_2023 = ETRI_2023_TT_Threshold_Video_Dataset(path, tokenizer, train, balanced, length, predict_length, sample_rate, num_frames, False)
+        if verbose:
+            print(f"ETRI ALL Dataset {'Train' if self.train else 'Test'} {'Balanced' if self.balanced else 'Imbalanced'}")
+            print(self.get_sample_in_class())
+            total_len = len(self.dataset_2022) * self.length + len(self.dataset_2023) * self.length
+            print(f"Total Sample Length : {int(total_len // 3600)}:{int(total_len % 3600 // 60):02d}:{total_len % 60:02.2f}s")
+    def __len__(self):
+        return len(self.dataset_2022) + len(self.dataset_2023)
+    def __getitem__(self, index):
+        if index < len(self.dataset_2022): return self.dataset_2022[index]
+        else: return self.dataset_2023[index - len(self.dataset_2022)]
     def get_sample_in_class(self):
         return self.dataset_2022.get_sample_in_class() + self.dataset_2023.get_sample_in_class()

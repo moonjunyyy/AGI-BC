@@ -1,18 +1,12 @@
 import os
 import gc
-import shutil
 import pandas as pd
 import torch
 import torch.nn.functional as F
-import torchvision
 import torchaudio
 from torch.utils.data import Dataset
 from typing import Callable
-from util.knusl import KnuSL
-import math
-from decord import VideoReader, cpu
 import numpy as np
-from konlpy.tag import Okt
 
 class ETRI_Word_Dataset(Dataset):
     def __init__(self, path, tokenizer, transform : Callable=None, length :int = 5) -> None:

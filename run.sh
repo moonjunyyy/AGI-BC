@@ -1,9 +1,9 @@
 #!/bin/bash
 
 #SBATCH -J BPM_MT
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-gpu=8
-#SBATCH --mem-per-gpu=16G
+#SBATCH --mem-per-gpu=36G
 #SBATCH -o %x_%j_%a.out
 #SBATCH -e %x_%j_%a.err
 #SBATCH --time=6-00:00:00
@@ -32,27 +32,25 @@ model=${1}
 mode=${2}
 dataset=${3}
 
-seeds=(1 21 42 3473 10741 32450 93462 85015 64648 71950 87557 99668 55552 4811 10741)
+export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.7;8.9;9.0;9.0a"
 
-export JAVA_HOME=dirname $(readlink -f $(which java))
-export PATH=$PATH:$JAVA_HOME
-export CUDA_LAUNCH_BLOCKING=1
+# seeds=(1 21 42 3473 10741 32450 93462 85015 64648 71950 87557 99668 55552 4811 10741)
+seeds=(99668)
 
-# rm -r ~/.cache/huggingface/hub/*
-# rm -r /local_datasets/etri*
-
-for i in seeds
+for i in ${seeds[@]}
 do
+    echo "seed: $i"
     python main.py \
     --model ${model} \
     --mode ${mode} \
     --dataset ${dataset} \
-    --seed ${seeds[$i]} \
-    --batch_size 64 \
+    --seed ${i} \
+    --batch_size 128 \
     --num_workers 8 \
     --epochs 100 \
     --language koBert \
     --audio HuBert \
+    --video VideoMAE \
     --lr 0.0005 \
     --dropout 0.3 \
     --world_size $WORLD_SIZE \

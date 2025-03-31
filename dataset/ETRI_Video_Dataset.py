@@ -1,21 +1,12 @@
 import os
-import math
 import logging
 import pandas as pd
-import decord
-from typing import Callable, Optional
 import torch
-from torch import Tensor
 import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import Dataset
 from utils.knusl import KnuSL
-from konlpy.tag import Okt 
-import gensim
-import random
-import torchvision
 import numpy as np
-import av
 
 class ETRI22_2S_Video_Generation_Dataset(Dataset):
     def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5) -> None:

@@ -1,17 +1,6 @@
-import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from itertools import permutations
-from utils.utils import get_audio_model, get_language_model
-from utils.kmeans import KMeans
-from layer.lora import LoRA
-from layer.cross_attention_layer import CrossAttentionLayer
-from layer.self_attention_layer import SelfAttentionLayer
-from sklearn.manifold import TSNE
 from model.video_mae import VideoMAE
-import logging
-import matplotlib.pyplot as plt
 
 class Audio_Text_Video(nn.Module):
     def __init__(self, language_model=None, audio_model=None, sentiment_dict = None, output_size=128, num_class=4, sentiment_output_size=64, dropout=0.3, mode="cross_entropy"):

@@ -4,22 +4,22 @@ import sys
 import time
 import random
 import torch
-from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
-import torch.nn as nn
+import torch.amp
 import torch.nn.functional as F
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import torchaudio
 import torch.backends.cudnn as cudnn
+from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader
 import numpy as np
 import torch
 import torch.nn.functional as F
 from utils.utils import get_dataset, get_audio_model,\
      get_language_model, get_backchannel_prediction_model, get_video_model
 from utils.criterions import get_criterion
-from utils.koalpaca import KoAlpaca
-from utils.prefetcher import Prefetcher
+from m00nny_utils.warmup_cosine_anneling import WarmUpCosineAnnelingScheduler
+from m00nny_utils.parameter_hook import ParameterHook
+from m00nny_utils.sharded_modules import all_gather, all_reduce
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 class Trainer:
@@ -29,6 +29,7 @@ class Trainer:
         self.path = args.path
         self.mode = args.mode
         self.criteria = get_criterion(self.mode)
+        self.data_path = args.data_path
 
         self.verbose = args.verbose
         self.model = args.model
@@ -68,10 +69,6 @@ class Trainer:
             os.environ["MASTER_PORT"] = "8888"
         print(f"world_size: {self.world_size}, rank: {self.rank}, ngpus_per_node: {self.ngpus_per_node}, distributed: {self.distributed}")
 
-        tokenizer, _ = get_language_model(self.language)
-        _ = get_audio_model(self.audio)
-        self.train_dataset, self.val_dataset, self.num_class = get_dataset(self.dataset, tokenizer)
-
     def run(self):
         if self.distributed:
             mp.spawn(self._run, nprocs=self.world_size, args=(self.world_size,))
@@ -82,8 +79,8 @@ class Trainer:
         self.local_rank = rank
         self.rank = self.rank * self.ngpus_per_node + rank
         self.world_size = world_size
+        torch.cuda.set_device(self.local_rank)
 
-        print("world_size: ", self.world_size)
         self.init_distributed()
         if self.seed is not None:
             random.seed(self.seed)
@@ -98,51 +95,51 @@ class Trainer:
                 'which can slow down your training considerably! '
                 'You may see unexpected behavior when restarting '
                 'from checkpoints.')
-        print(f"rank {self.rank} is running...")
 
         if self.language is not None:
-            _, language_model = get_language_model(self.language)
+            tokenizer, language_model = get_language_model(self.language)
         if self.audio is not None:
             audio_model = get_audio_model(self.audio)
         if self.video is not None:
             video_model = get_video_model(self.video)
 
-        self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset, shuffle=True, num_replicas=self.world_size, rank=self.rank, drop_last=True)
-        self.val_sampler = torch.utils.data.distributed.DistributedSampler(self.val_dataset, shuffle=False, num_replicas=self.world_size, rank=self.rank, drop_last=True)
-        self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
-        self.val_dataloader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler, num_workers=self.num_workers) 
-        # self.train_dataloader = Prefetcher(self.num_workers, name='train')
-        # self.val_dataloader = Prefetcher(self.num_workers, name='val')
-        # self.train_dataloader.load(self.train_dataset, None, self.batch_size, sampler=self.train_sampler)
-        # self.val_dataloader.load(self.val_dataset, None, int(self.batch_size*1.5), sampler=self.val_sampler)
-        print(f"rank {self.rank} is running...")
+        self.train_dataset, self.val_dataset, self.num_class = get_dataset(self.dataset, self.data_path, tokenizer)
+        self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True,  num_replicas=self.world_size, rank=self.rank, drop_last=True)
+        self.val_sampler =   DistributedSampler(self.val_dataset,   shuffle=False, num_replicas=self.world_size, rank=self.rank, drop_last=True)
+        self.train_dataloader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, sampler=self.train_sampler, num_workers=self.num_workers)
+        self.val_dataloader =   DataLoader(self.val_dataset,   batch_size=self.batch_size, shuffle=False, sampler=self.val_sampler,   num_workers=self.num_workers)
 
         if self.model == 'BPM_MT':
             self.is_MT = True
         else:
             self.is_MT = False
+
         self.model = get_backchannel_prediction_model(self.model)(
             language_model=language_model,
             audio_model=audio_model,
+            video_model=video_model,
             output_size=128,
             num_class=self.num_class,
             sentiment_output_size=64,
             dropout=0.3,
             mode=self.mode)
-        self.model = self.model.to(self.local_rank)
-        self.model_without_ddp = self.model
-        if self.distributed:
-            self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.local_rank], output_device=self.local_rank, find_unused_parameters=True)
 
         bert_params = []
         other_params = []
         prompt_params = []
 
-        self.pretext_epoch = 100
+        self.model = self.model.cuda()
+        self.model_without_ddp = self.model
+        if self.distributed:
+            # self.model = torch.nn.parallel.DistributedDataParallel(self.model, find_unused_parameters=True)
+            self.hooker = ParameterHook(self.model)
+
+        self.pretext_epoch = 10
         self.model.train()
         try:
-            state_dict = torch.load(f'{self.path}/pretrained.pt')
-            self.model_without_ddp.load_state_dict(state_dict)
+            state_dict = torch.load(f'{self.path}/pretrained.pt', map_location=f'cpu', weights_only=True)
+            self.model_without_ddp.load_state_dict(state_dict, strict=False)
+            self.model_without_ddp.to('cuda')
             print('Load pretrained model')
         except Exception as e:
             print(e)
@@ -150,24 +147,38 @@ class Trainer:
             if hasattr(self.model_without_ddp, 'pretext_task'):
                 self.model_without_ddp.pretext_task(self.train_dataloader)
                 self.train_sampler.epoch += 1
-                torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
+                self.train_sampler.set_epoch(self.train_sampler.epoch)
+                if dist.get_rank() == 0:
+                    torch.save(self.model_without_ddp.state_dict(), f'{self.path}/pretrained.pt')
                 sys.stdout.flush()
             else:
                 print('No pretext training')
         # import matplotlib.pyplot as plt
         bert_params = []
         other_params = []
+        prompt_params = []
+        classifier_params = []
+
         for name, param in self.model.named_parameters():
-            # print(name)
-            if 'language_model' in name or 'audio_model' in name:
+            if 'language_model' in name or 'audio_model' in name or 'video_model' in name:
                 bert_params.append(param)
             elif 'prompt' in name:
                 prompt_params.append(param)
+            elif 'fc_layer' in name or 'classifier' in name:
+                classifier_params.append(param)
             else:
                 other_params.append(param)
-                
-        optimizer = torch.optim.Adam(other_params, lr=2e-5, weight_decay=self.weight_decay)
-        optimizer.add_param_group({'params': bert_params, 'lr': 2e-5})
+        whole_params = bert_params + other_params + prompt_params + classifier_params        
+        
+        # optimizer = torch.optim.AdamW(bert_params, lr=5e-6, weight_decay=self.weight_decay)
+        optimizer = torch.optim.AdamW(bert_params, lr=5e-6)
+        optimizer.add_param_group({'params': other_params, 'lr': 5e-5})
+        optimizer.add_param_group({'params': classifier_params, 'lr': 5e-4})
+        # scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
+        scheduler = WarmUpCosineAnnelingScheduler(optimizer, warmup_steps=5, t_total=20)
+        scheduler.step() # the first step is zero
+        optimizer.param_groups[2]['lr'] = 5e-4
+        scaler = torch.amp.GradScaler('cuda')
         
         for epoch in range(self.epochs):
             self.model.train()
@@ -175,8 +186,10 @@ class Trainer:
             if hasattr(self.model_without_ddp, 'pre_epoch'):
                 self.model_without_ddp.pre_epoch(self.train_dataloader)
                 self.train_sampler.epoch += 1
+                self.train_sampler.set_epoch(self.train_sampler.epoch)
 
             self.model.train()
+            print(f"Epoch : {epoch}, Learning Rate : {[param_group['lr'] for param_group in optimizer.param_groups]}")
 
             train_acc = 0
             train_loss = 0
@@ -188,54 +201,66 @@ class Trainer:
                 # continue
                 # Move the batch to GPU if CUDA is available
                 for key in batch:
-                    batch[key] = batch[key].to(self.local_rank)
+                    batch[key] = batch[key].cuda()
                 # print(f"load data {self.rank} : {time.time() - start}"); start = time.time()
 
-                y = self.model.forward(batch)
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    y = self.model.forward(batch)
 
-                loss = 0
-                if 'logit' in y.keys():
-                    loss, logit = self.criteria(batch, y)
-                    loss = loss.mean()
+                    loss = 0
+                    if 'logit' in y.keys():
+                        loss, logit = self.criteria(batch, y)
+                        loss = loss.mean()
 
-                    accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
-                    
-                    train_acc += accuracy.item() * len(batch["label"])
-                    train_loss += loss.item() * len(batch["label"])
-                    count += len(batch["label"])
-                    # if self.verbose:
-                    #     print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
-                    l, c = logit.argmax(dim=-1).unique(return_counts=True)
-                if 'consistency_loss' in y.keys():
-                    loss = loss + 0.1 * y['consistency_loss'].mean()
-                if 'identity' in y.keys():
-                    loss = loss + 0.5 * y['identity'].mean()
-                if 'contrastive_loss' in y.keys():
-                    loss = loss + 0.5 * y['contrastive_loss'].mean()
-                if "audio_key_loss" in y.keys():
-                    loss = loss + 0.1 * y["audio_key_loss"]
-                if "text_key_loss" in y.keys():
-                    loss = loss + 0.1 * y["text_key_loss"]
-                if self.is_MT:
-                    loss = 0.9 * loss + 0.1 * F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
-                if 'audio' in y.keys():
-                    loss = loss + y['audio']
-                if 'text' in y.keys():
-                    loss = loss + y['text']
-                if 'video' in y.keys():
-                    loss = loss + y['video']
+                        accuracy = (logit.argmax(dim=-1) == batch["label"]).float().mean()
+                        
+                        train_acc += accuracy.item() * len(batch["label"])
+                        train_loss += loss.item() * len(batch["label"])
+                        count += len(batch["label"])
+                        # if self.verbose:
+                        #     print("Epoch : {}, {}/{},  Loss : {:.6f}, Acc : {:.3f},".format(epoch, b+1, len(self.train_dataloader), loss.item(), accuracy.item()*100), end='\r')
+                        l, c = logit.argmax(dim=-1).unique(return_counts=True)
+                    if 'consistency_loss' in y.keys():
+                        loss = loss + 0.1 * y['consistency_loss'].mean()
+                    if 'identity' in y.keys():
+                        loss = loss + 0.5 * y['identity'].mean()
+                    if 'contrastive_loss' in y.keys():
+                        loss = loss + 0.5 * y['contrastive_loss'].mean()
+                    if "audio_key_loss" in y.keys():
+                        loss = loss + 0.1 * y["audio_key_loss"]
+                    if "text_key_loss" in y.keys():
+                        loss = loss + 0.1 * y["text_key_loss"]
+                    if "InfoNCE" in y.keys():
+                        loss = loss + 0.1 * y["InfoNCE"]
+                    if self.is_MT:
+                        loss = 0.9 * loss + 0.1 * F.cross_entropy(y['sentiment'], batch['sentiment'], reduction='mean')
+                    if 'audio' in y.keys():
+                        loss = loss + y['audio'] * 0.5
+                    if 'text' in y.keys():
+                        loss = loss + y['text'] * 0.5
+                    if 'video' in y.keys():
+                        loss = loss + y['video'] * 0.5
+                    if 'similarity' in y.keys():
+                        loss = loss + y['similarity']
 
                 # Zero the gradients
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                # loss.backward()
+                # optimizer.step()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 gc.collect()
                 print(f"Epoch : {epoch}, {b}/{len(self.train_dataloader)}, Loss : {loss.item():.6f}, Acc : {accuracy.item()*100:.3f}", end='\r')
             print(flush=True)
             gc.collect()
             self.train_sampler.epoch += 1
+            self.train_sampler.set_epoch(self.train_sampler.epoch)
             train_acc /= count
             train_loss /= count
+            scheduler.step()
+            optimizer.param_groups[2]['lr'] = 5e-4
+
             self.model.eval()
             with torch.no_grad():
                 accuracy = 0
@@ -252,7 +277,7 @@ class Trainer:
                     print(f"Validation {i}/{len(self.val_dataloader)}", end='\r')
                     # Move the batch to GPU if CUDA is available
                     for key in batch:
-                        batch[key] = batch[key].to(self.local_rank)
+                        batch[key] = batch[key].cuda()
 
                     y = self.model(batch)
 
@@ -284,18 +309,18 @@ class Trainer:
                 pred = torch.cat(pred, dim=0)
 
                 if self.distributed:
-                    label = label.to(self.local_rank)
-                    pred = pred.to(self.local_rank)
+                    label = label.cuda()
+                    pred = pred.cuda()
 
-                    accuracy = accuracy.to(self.local_rank)
-                    loss = loss.to(self.local_rank)
-                    tp = tp.to(self.local_rank)
-                    fp = fp.to(self.local_rank)
-                    fn = fn.to(self.local_rank)
-                    tn = tn.to(self.local_rank)
+                    accuracy = accuracy.cuda()
+                    loss = loss.cuda()
+                    tp = tp.cuda()
+                    fp = fp.cuda()
+                    fn = fn.cuda()
+                    tn = tn.cuda()
 
-                    label = self.all_gather(label)
-                    pred = self.all_gather(pred)
+                    label = all_gather(label)
+                    pred = all_gather(pred)
                     dist.all_reduce(accuracy, op=dist.ReduceOp.SUM)
                     dist.all_reduce(loss, op=dist.ReduceOp.SUM)
                     dist.all_reduce(tp, op=dist.ReduceOp.SUM)
@@ -347,13 +372,12 @@ class Trainer:
                     self.local_rank = self.gpu
                     self.rank = self.node_rank * self.ngpus_per_node + self.gpu
                     time.sleep(self.rank * 0.1) # prevent port collision
-                    print(f'rank {self.rank} is running...')
+                    print(f"rank {self.rank}/{self.world_size} is running on GPU {self.device}")
+                    torch.cuda.set_device(self.device)
                     dist.init_process_group(backend=self.dist_backend, init_method=self.dist_url,
                                             world_size=self.world_size, rank=self.rank)
-                    dist.barrier()
                     self.setup_for_distributed(self.is_main_process())
-        else:
-            self.device = torch.device('cpu')
+        else: self.device = torch.device('cpu')
 
     def is_main_process(self):
         return self.get_rank() == 0
@@ -372,36 +396,5 @@ class Trainer:
         __builtin__.print = print
 
     def get_rank(self):
-        if self.distributed:
-            return dist.get_rank()
+        if self.distributed: return dist.get_rank()
         return 0
-    
-    def all_gather(self, item):
-        local_size = torch.tensor(item.size(0), device=self.device)
-        all_sizes = [torch.zeros_like(local_size) for _ in range(dist.get_world_size())]
-        for i in range(dist.get_world_size()):
-            if i == dist.get_rank():
-                dist.gather(local_size, all_sizes, dst=i)
-            else:
-                dist.gather(local_size, dst=i)
-        # dist.all_gather(all_sizes, local_size, async_op=False)
-        max_size = max(all_sizes)
-
-        size_diff = max_size.item() - local_size.item()
-        if size_diff:
-            padding = torch.zeros(size_diff, device=self.device, dtype=item.dtype)
-            item = torch.cat((item, padding))
-
-        all_qs_padded = [torch.zeros_like(item) for _ in range(dist.get_world_size())]
-
-        for i in range(dist.get_world_size()):
-            if i == dist.get_rank():
-                dist.gather(item, all_qs_padded, dst=i)
-            else:
-                dist.gather(item, dst=i)
-
-        # dist.all_gather(all_qs_padded, item)
-        all_qs = []
-        for q, size in zip(all_qs_padded, all_sizes):
-            all_qs.append(q[:size])
-        return all_qs

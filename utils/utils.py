@@ -3,7 +3,7 @@ def get_audio_model(name):
     from model.hubert import HuBert
     from model.audio_lstm import Audio_LSTM
     from model.audio_stft_cnn import AudioStftCnn
-            
+
     if name == 'LSTM':
         audio_model = Audio_LSTM()
     elif name == 'HuBert':
@@ -26,9 +26,14 @@ def get_language_model(name):
     if name == 'koBert':
         import json
         from kobert_tokenizer import KoBERTTokenizer
-        from kobert.pytorch_kobert import get_pytorch_kobert_model
-        bert, vocab = get_pytorch_kobert_model()
-        tokenizer = KoBERTTokenizer.from_pretrained('skt/kobert-base-v1')
+        from transformers import BertModel, DistilBertModel, XLNetTokenizer
+        # from kobert_tokenizer import KoBertTokenizer
+        # from kobert.pytorch_kobert import get_pytorch_kobert_model
+        # bert, vocab = get_pytorch_kobert_model()
+        # tokenizer = KoBertTokenizer.from_pretrained('skt/kobert-base-v1')
+        tokenizer = XLNetTokenizer.from_pretrained('skt/kobert-base-v1')
+        # tokenizer = KoBERTTokenizer.from_pretrained('skt/kobert-base-v1')
+        bert = BertModel.from_pretrained("skt/kobert-base-v1")
         sentiment_dict = json.load(open('data/SentiWord_info.json', encoding='utf-8-sig', mode='r'))
     # elif name == 'Bert':
         # from transformers import BertModel, AutoTokenizer
@@ -42,38 +47,40 @@ def get_language_model(name):
         raise NotImplementedError
     return tokenizer, bert
 
-def get_dataset(name, tokenizer):
+def get_dataset(name, path, tokenizer):
     from torch.utils.data import Subset
     from dataset.SWBD_Dataset import SWBD_Dataset
-    from dataset.ETRI_Dataset import ETRI_2022_Dataset, ETRI_2023_Dataset, ETRI_All_Dataset, ETRI_2022_Video_Dataset, ETRI_2023_Video_Dataset, ETRI_All_Video_Dataset
+    from dataset.ETRI_Dataset import ETRI_All_Video_Dataset, ETRI_All_TT_Video_Dataset, ETRI_All_Dialog_Video_Dataset, ETRI_All_Threshold_Video_Dataset, ETRI_All_TT_Threshold_Video_Dataset
     if name == 'SWBD':
-        dataset = SWBD_Dataset(path = '/local_datasets', tokenizer=tokenizer, length=1.5)
+        dataset = SWBD_Dataset(path = './data', tokenizer=tokenizer, length=1.5)
         train_dataset = Subset(dataset, range(0, int(len(dataset)*0.8)))
         val_dataset = Subset(dataset, range(int(len(dataset)*0.8), len(dataset)))
         num_class = 3
-    elif name == 'ETRI_2022':
-        train_dataset = ETRI_2022_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_2022_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
-    elif name == 'ETRI_2023':
-        train_dataset = ETRI_2023_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_2023_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
-    elif name == 'ETRI_ALL':
-        train_dataset = ETRI_All_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_All_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
-    elif name == 'ETRI_2022_Video':
-        train_dataset = ETRI_2022_Video_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_2022_Video_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
-    elif name == 'ETRI_2023_Video':
-        train_dataset = ETRI_2023_Video_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_2023_Video_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
-        num_class = 4
     elif name == 'ETRI_ALL_Video':
-        train_dataset = ETRI_All_Video_Dataset(path = '/local_datasets', train=True, tokenizer=tokenizer, length=1.5)
-        val_dataset = ETRI_All_Video_Dataset(path = '/local_datasets', train=False, tokenizer=tokenizer,  length=1.5)
+        train_dataset = ETRI_All_Video_Dataset(path = path, train=True, tokenizer=tokenizer, length=1.5, balanced=False)
+        val_dataset   = ETRI_All_Video_Dataset(path = path, train=False, tokenizer=tokenizer,  length=1.5, balanced=False)
+        num_class = 4
+    elif name == 'ETRI_ALL_TT_Video':
+        train_dataset = ETRI_All_TT_Video_Dataset(path = path, train=True,  tokenizer=tokenizer, length=1.5, balanced=False)
+        val_dataset   = ETRI_All_TT_Video_Dataset(path = path, train=False, tokenizer=tokenizer, length=1.5, balanced=False)
+        # train_dataset = ETRI_All_TT_Clip_Dataset(path = path, train=True, tokenizer=tokenizer, length=1.5)
+        # val_dataset = ETRI_All_TT_Clip_Dataset(path = path, train=False, tokenizer=tokenizer,  length=1.5)
+        num_class = 4
+    elif name == 'ETRI_ALL_Dialog_Video':
+        train_dataset = ETRI_All_Dialog_Video_Dataset(path = path, train=True,  tokenizer=tokenizer, length=1.5)
+        val_dataset   = ETRI_All_Dialog_Video_Dataset(path = path, train=False, tokenizer=tokenizer, length=1.5)
+        num_class = 4
+    elif name == 'ETRI_ALL_Dialog_Video_3S':
+        train_dataset = ETRI_All_Dialog_Video_Dataset(path = path, train=True,  tokenizer=tokenizer, length=3)
+        val_dataset   = ETRI_All_Dialog_Video_Dataset(path = path, train=False, tokenizer=tokenizer, length=3)
+        num_class = 4
+    elif name == 'ETRI_ALL_Threshold_Video':
+        train_dataset = ETRI_All_Threshold_Video_Dataset(path = path, train=True,  tokenizer=tokenizer, length=3, balanced=False)
+        val_dataset   = ETRI_All_Threshold_Video_Dataset(path = path, train=False, tokenizer=tokenizer, length=3, balanced=False)
+        num_class = 4
+    elif name == 'ETRI_ALL_TT_Threshold_Video':
+        train_dataset = ETRI_All_TT_Threshold_Video_Dataset(path = path, train=True,  tokenizer=tokenizer, length=3, balanced=False)
+        val_dataset   = ETRI_All_TT_Threshold_Video_Dataset(path = path, train=False, tokenizer=tokenizer, length=3, balanced=False)
         num_class = 4
     else:
         NotImplementedError
@@ -85,26 +92,26 @@ def get_backchannel_prediction_model(name):
     from model.ours import Ours
     from model.lora import LoRA_BC
     from model.finetune import Finetune
-    from model.contrastive_prototype import Contrastive_Prototype
     from model.Proxy_Prototype import Proxy_Prototype
-    from model.audio_text_video import Audio_Text_Video
-    from model.lora_selection import LoRASelection
-    from model.diffuse_backchannel import Diffused_Backchannel
+    from model.diffused_backchannel import Diffused_Backchannel
+    from model.ours_video import Ours_Video
+    from model.ours_video_allign import Ours_Video_Align
+    from model.ours_video_missing_align import Ours_Video_Missing_Align
 
     try:
         return {
-            'ATV' : Audio_Text_Video,
             'BPM_MT': BPM_MT,
             'BPM_ST': BPM_ST,
             'BPM_ST_Target': BPM_ST_Target,
             'BPM_ST_Target_Token': BPM_ST_Target_Token,
-            'Ours': Ours,
             'LoRA' : LoRA_BC,
             'Finetune' : Finetune,
-            'Contrastive_Prototype' : Contrastive_Prototype,
             'Proxy_Prototype' : Proxy_Prototype,
-            'lora_selection' : LoRASelection,
-            'Diffused_Backchannel' : Diffused_Backchannel
+            'Diffused_Backchannel' : Diffused_Backchannel,
+            'Ours': Ours,
+            'Ours_video' : Ours_Video,
+            'Ours_video_align' : Ours_Video_Align,
+            'Ours_video_missing_align' : Ours_Video_Missing_Align,
         }[name]
     except:
         raise NotImplementedError

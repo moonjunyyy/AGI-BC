@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import av
 import numpy as np
 from transformers import VideoMAEImageProcessor, VideoMAEModel
 # MCG-NJU/videomae-base
@@ -22,8 +21,3 @@ class VideoMAE(nn.Module):
     
     def get_feature_size(self):
         return 768
-
-
-
-
-

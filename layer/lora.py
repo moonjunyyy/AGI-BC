@@ -7,15 +7,18 @@ class LoRA(nn.Module):
     def __init__(self, layer : nn.Linear, rank : int, alpha : int=None) -> None:
         super().__init__()
         self.register_buffer('W', torch.zeros(layer.weight.shape))
-        self.register_buffer('b', torch.zeros(layer.bias.shape))
         self.W = layer.weight.detach().clone().requires_grad_(False)
-        self.b = layer.bias.detach().clone().requires_grad_(False)
+        if layer.bias is not None:
+            self.register_buffer('b', torch.zeros(layer.bias.shape))
+            self.b = layer.bias.detach().clone().requires_grad_(False)
+        else:
+            self.b = None
         self.rank = rank
-        self.dim_in = layer.weight.shape[1]
+        self.dim_in  = layer.weight.shape[1]
         self.dim_out = layer.weight.shape[0]
-        self.alpha = alpha if alpha is not None else rank
-        self.lora_a = nn.Parameter(torch.randn(self.dim_in, self.rank, requires_grad=True))
-        self.lora_b = nn.Parameter(torch.randn(self.rank, self.dim_out, requires_grad=True))
+        self.alpha   = alpha if alpha is not None else rank
+        self.lora_a  = nn.Parameter(torch.randn(self.dim_in,  self.rank, requires_grad=True))
+        self.lora_b  = nn.Parameter(torch.randn(self.rank, self.dim_out, requires_grad=True))
         self.lora_scale = self.alpha / self.rank
         nn.init.normal_(self.lora_a, 0, 1)
         nn.init.zeros_(self.lora_b)
@@ -29,7 +32,16 @@ class LoRA(nn.Module):
         Ax  = x @ self.lora_a
         BAx = Ax @ self.lora_b
         BAx = BAx * self.lora_scale
-        return Wx + BAx + self.b
+        if self.b is not None:
+            return Wx + BAx + self.b
+        else:
+            return Wx + BAx
+        
+    def __repr__(self):
+        return f"LoRA({self.dim_in}, {self.dim_out}, rank={self.rank}, alpha={self.alpha})"
+    
+    def extra_repr(self):
+        return f"rank={self.rank}, alpha={self.alpha}"
 
 class SelectionLoRA(nn.Module):
     def __init__(self, linear_layer:nn.Linear, num_loras, rank:int=4, alpha:float=1.0):
