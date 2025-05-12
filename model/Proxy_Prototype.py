@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from itertools import permutations
 from utils.utils import get_audio_model, get_language_model
-from M00NNY_Utils.kmeans import KMeans
-from M00NNY_Utils.sharded_modules import all_gather, all_reduce
+from m00nny_utils.algorithms.kmeans import KMeans
+from m00nny_utils.torch_util.parallel.sharded_modules import all_gather
 from layer.lora import LoRA
 from layer.cross_attention_layer import CrossAttentionLayer
 from layer.self_attention_layer import SelfAttentionLayer

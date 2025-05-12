@@ -9,3 +9,4 @@ ETRI_preprocess.py
 *.pyc
 *.wav
 *.txt
+*.log

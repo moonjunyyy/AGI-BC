@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 from dataclasses import dataclass
 from utils.wavfile import WavFile
 from utils.mp4file import Mp4File
-from M00NNY_Utils.threads import Thread_With_Return_Value
+from m00nny_utils.system.threads import Thread
 
 class ETRI_Dataset(Dataset):
     def __init__(self, path, tokenizer, train = False, balanced=True, length :float = 1.5, predict_length:float = 0.5, sample_rate = 16000, num_frames = 16) -> None:
@@ -47,8 +47,8 @@ class ETRI_Dataset(Dataset):
         counselor = {}
         client = {}
         for idx, filename in enumerate(self.dataframe['folder'].unique()):
-            counselor[filename] = Thread_With_Return_Value(daemon=True, target=_load, args=(f"{filename}_counselor",))
-            client[filename] = Thread_With_Return_Value(daemon=True, target=_load, args=(f"{filename}_client",))
+            counselor[filename] = Thread(daemon=True, target=_load, args=(f"{filename}_counselor",))
+            client[filename] = Thread(daemon=True, target=_load, args=(f"{filename}_client",))
             counselor[filename].start()
             client[filename].start()
         for key in set(list(counselor.keys()) + list(client.keys())):
@@ -71,8 +71,8 @@ class ETRI_Dataset(Dataset):
         counselor = {}
         client = {}
         for idx, filename in enumerate(self.dataframe['folder'].unique()):
-            counselor[filename] = Thread_With_Return_Value(daemon=True, target=_load, args=(f"{filename}_counselor",))
-            client[filename] = Thread_With_Return_Value(daemon=True, target=_load, args=(f"{filename}_client",))
+            counselor[filename] = Thread(daemon=True, target=_load, args=(f"{filename}_counselor",))
+            client[filename] = Thread(daemon=True, target=_load, args=(f"{filename}_client",))
             counselor[filename].start()
             client[filename].start()
         for key in set(list(counselor.keys()) + list(client.keys())):
@@ -139,10 +139,10 @@ class ETRI_2022_Dataset(ETRI_Dataset):
     def __getitem__(self, index):
         ret = {}
         item = self.dataframe.iloc[index]
-        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()        
-        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
-        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+        audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()        
+        target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+        trans = Thread(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
@@ -172,10 +172,10 @@ class ETRI_2023_Dataset(ETRI_Dataset):
     def __getitem__(self, index):
         ret = {}
         item = self.dataframe.iloc[index]
-        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
-        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
-        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+        audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+        target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+        trans = Thread(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
@@ -231,17 +231,17 @@ class ETRI_2022_Video_Dataset(ETRI_Dataset):
         ret = {}
         item = self.dataframe.iloc[index]
         if item['BC'] == 0:
-            audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="audio"); audio.start()
-            video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="video"); video.start()
-            target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_audio"); target_audio.start()
-            target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_video"); target_video.start()
+            audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="audio"); audio.start()
+            video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="video"); video.start()
+            target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_audio"); target_audio.start()
+            target_video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_video"); target_video.start()
         else:
-            audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
-            video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
-            target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
-            target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
-        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+            audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+            video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
+            target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+            target_video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
+        trans = Thread(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
@@ -275,17 +275,17 @@ class ETRI_2023_Video_Dataset(ETRI_Dataset):
         ret = {}
         item = self.dataframe.iloc[index]
         if item['BC'] == 0:
-            audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="audio"); audio.start()
-            video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="video"); video.start()
-            target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_audio"); target_audio.start()
-            target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_video"); target_video.start()
+            audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="audio"); audio.start()
+            video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start']-2., -self.length), name="video"); video.start()
+            target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_audio"); target_audio.start()
+            target_video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('counselor' if item['role']=='counselor' else 'client'), item['bc_start']-2., self.predict_length), name="target_video"); target_video.start()
         else:
-            audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
-            video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
-            target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
-            target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
-        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+            audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+            video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
+            target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+            target_video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
+        trans = Thread(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
@@ -342,12 +342,12 @@ class ETRI_2022_TT_Video_Dataset(ETRI_Dataset):
     def __getitem__(self, index):
         ret = {}
         item = self.dataframe.iloc[index]
-        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
-        video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
-        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
-        target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
-        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+        audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+        video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
+        target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+        target_video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
+        trans = Thread(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
@@ -380,12 +380,12 @@ class ETRI_2023_TT_Video_Dataset(ETRI_Dataset):
     def __getitem__(self, index):
         ret = {}
         item = self.dataframe.iloc[index]
-        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
-        video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
-        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
-        target_video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
-        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
+        audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="audio"); audio.start()
+        video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['bc_start'], -self.length), name="video"); video.start()
+        target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_audio"); target_audio.start()
+        target_video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+ ('client' if item['role']=='counselor' else 'counselor'), item['bc_start'], self.predict_length), name="target_video"); target_video.start()
+        trans = Thread(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_trans = Thread(daemon=True, target=self.tokenizer, args=(item['back'],), kwargs={'padding':'max_length', 'max_length':5, 'truncation':True, 'return_tensors':"pt"}); target_trans.start()
 
         ret['audio'] = audio.join()
         ret['target_audio'] = target_audio.join()
@@ -511,10 +511,10 @@ class ETRI_2022_Dialog_Video_Dataset(ETRI_Dataset):
     def __getitem__(self, index):
         ret = {}
         item = self.dataframe.iloc[index]
-        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="audio"); audio.start()
-        video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="video"); video.start()
-        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], self.predict_length), name="target_audio"); target_audio.start()
+        audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="audio"); audio.start()
+        video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="video"); video.start()
+        trans = Thread(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], self.predict_length), name="target_audio"); target_audio.start()
 
         ret['audio'] = audio.join()
         ret['video'] = video.join()
@@ -598,10 +598,10 @@ class ETRI_2023_Dialog_Video_Dataset(ETRI_Dataset):
     def __getitem__(self, index):
         ret = {}
         item = self.dataframe.iloc[index]
-        audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="audio"); audio.start()
-        video = Thread_With_Return_Value(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="video"); video.start()
-        trans = Thread_With_Return_Value(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
-        target_audio = Thread_With_Return_Value(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], self.predict_length), name="target_audio"); target_audio.start()
+        audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="audio"); audio.start()
+        video = Thread(daemon=True, target=self.__get_video__, args=(item['folder']+'_'+item['role'], item['time'], -self.length), name="video"); video.start()
+        trans = Thread(daemon=True, target=self.tokenizer, args=(item['transcript'],), kwargs={'padding':'max_length', 'max_length':20, 'truncation':True, 'return_tensors':"pt"}); trans.start()
+        target_audio = Thread(daemon=True, target=self.__get_audio__, args=(item['folder']+'_'+item['role'], item['time'], self.predict_length), name="target_audio"); target_audio.start()
         
         ret['audio'] = audio.join()
         ret['video'] = video.join()

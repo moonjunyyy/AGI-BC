@@ -17,9 +17,9 @@ import torch.nn.functional as F
 from utils.utils import get_dataset, get_audio_model,\
      get_language_model, get_backchannel_prediction_model, get_video_model
 from utils.criterions import get_criterion
-from m00nny_utils.warmup_cosine_anneling import WarmUpCosineAnnelingScheduler
-from m00nny_utils.parameter_hook import ParameterHook
-from m00nny_utils.sharded_modules import all_gather, all_reduce
+from m00nny_utils.torch_util.lr_scheduler.warmup_cosine_anneling import WarmUpCosineAnnelingScheduler
+from m00nny_utils.torch_util.parallel.parameter_hook import ParameterHook
+from m00nny_utils.torch_util.parallel.sharded_modules import all_gather, all_reduce
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 class Trainer:

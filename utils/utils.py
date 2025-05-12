@@ -97,6 +97,8 @@ def get_backchannel_prediction_model(name):
     from model.ours_video import Ours_Video
     from model.ours_video_allign import Ours_Video_Align
     from model.ours_video_missing_align import Ours_Video_Missing_Align
+    from model.ours_video_allign_disentangle import Ours_Video_Align_Disentangle
+    from model.Praveen_etal import Praveen_etal
 
     try:
         return {
@@ -112,6 +114,8 @@ def get_backchannel_prediction_model(name):
             'Ours_video' : Ours_Video,
             'Ours_video_align' : Ours_Video_Align,
             'Ours_video_missing_align' : Ours_Video_Missing_Align,
+            'Ours_video_align_disentangle' : Ours_Video_Align_Disentangle,
+            'Praveen_etal' : Praveen_etal,
         }[name]
     except:
         raise NotImplementedError

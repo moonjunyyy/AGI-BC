@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-from m00nny_utils.threads import Thread_With_Return_Value
+from m00nny_utils.system.threads import Thread
 from PIL import Image
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 1, 3)
@@ -43,7 +43,7 @@ class _Mp4File:
             toread = idx
         else:
             raise ValueError("Invalid index type")
-        frames = [Thread_With_Return_Value(target=self._read_frame, args=(i,), daemon=True) for i in toread] 
+        frames = [Thread(target=self._read_frame, args=(i,), daemon=True) for i in toread] 
         [frame.start() for frame in frames]
         frames = np.stack([frame.join() for frame in frames], axis=0)
         frames = frames.astype(np.float32) / 255.0

@@ -6,7 +6,7 @@
 #SBATCH --mem-per-gpu=36G
 #SBATCH -o %x_%j_%a.out
 #SBATCH -e %x_%j_%a.err
-#SBATCH --time=6-00:00:00
+#SBATCH --time=4-00:00:00
 
 date
 ulimit -n 65536
