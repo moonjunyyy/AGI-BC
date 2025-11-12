@@ -1,12 +1,24 @@
+# Byte-compiled / optimized / DLL files
 .cache/*
 __pycache__/*
+*.py[co]
+*.so
+*.dylib
+*.dll
+
+# Logs and Experimental outputs, etc.
+/results/*
 *.out
+*.log
 *.err
-test.py
-ETRI_preprocess.py
 *.pt
+*.safetensors
 *.png
-*.pyc
 *.wav
 *.txt
-*.log
+*.json
+
+# Testing or Data preprocessing scripts
+# !!! These may include sensitive privacy information !!!
+test.py
+ETRI_preprocess.py
