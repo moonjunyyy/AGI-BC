@@ -17,15 +17,16 @@ export WORLD_SIZE=$SLURM_NNODES
 
 ### get the first node name as master address - customized for vgg slurm
 ### e.g. master(gnodee[2-5],gnoded1) == gnodee2
-echo "NODELIST="${SLURM_NODELIST}
-master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_ADDR=$master_addr
+# echo "NODELIST="${SLURM_NODELIST}
+# master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+export MASTER_ADDR=localhost
 echo "MASTER_ADDR="$MASTER_ADDR
+echo "MASTER_PORT="$MASTER_PORT
 
-source /data/moonjunyyy/init.sh
-conda activate BC
+# source /data/moonjunyyy/init.sh
+# conda activate BC
 
-conda --version
+# conda --version
 python --version
 
 model=${1}

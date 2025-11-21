@@ -1,9 +1,7 @@
 import os
+import torch
 import ffmpeg
-import cv2
 import numpy as np
-from m00nny_utils.system.threads import Thread
-from PIL import Image
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 1, 3)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 1, 3)
@@ -45,18 +43,31 @@ class _Mp4File:
             toread = idx
         else:
             raise ValueError("Invalid index type")
+        ffmpeg_query = " + ".join([f"eq(n,{i})" for i in toread])
         out, _ = (
-            ffmpeg.input(self.filename)
+            ffmpeg
+            .input(self.filename)
+            .filter(
+                "select",
+                ffmpeg_query,
+            )
             .output(
                 "pipe:",
                 format="rawvideo",
                 pix_fmt="rgb24",
-                ss=toread[0],
-                select=f"between(n,{toread[0]},{toread[-1]})",
             )
-            .run(capture_stdout=True)
+            .run(
+                capture_stdout=True,
+                capture_stderr=True,
+            )
         )
-        video = np.frombuffer(out, np.uint8).reshape([-1, self.height, self.width, 3])
+        video = (
+            np
+            .frombuffer(out, np.uint8)
+            .reshape([-1, self.height, self.width, 3])
+        ).astype(np.float32) / 255.0
+        video = (video - IMAGENET_MEAN) / IMAGENET_STD
+        video = torch.from_numpy(video)
         return video
 
 
