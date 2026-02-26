@@ -9,6 +9,7 @@ import torch.distributed as dist
 from utils.utils import get_dataset
 from subprocess import Popen, STDOUT, DEVNULL
 
+
 class LLama_Inference:
     def __init__(self, args) -> None:
         print(args)
@@ -24,15 +25,15 @@ class LLama_Inference:
         self.batch_size = 32
 
         self.daemon = Popen([f'{self.llama_path}/llama-server',
-                             f'-m',
+                             '-m',
                              f'{self.llama_path}/models/Meta-Llama-3.1-8B-Instruct/Meta-Llama-3.1-8B-Instruct-F16.gguf',
-                             f'-ngl',
+                             '-ngl',
                              f'{33 if self.use_CUDA else 0}',
-                             f'--port',
-                             f'24763',
-                             f'-np',
+                             '--port',
+                             '24763',
+                             '-np',
                              f'{self.batch_size}',
-                             f'-ns',
+                             '-ns',
                              f'{self.batch_size}',],
                             stdout=DEVNULL, stdin=DEVNULL, stderr=STDOUT)
 
@@ -43,13 +44,18 @@ class LLama_Inference:
             begin = time.time()
             while time.time() - begin < _timeout:
                 try:
-                    if process.stdout.peek(1) is None: raise Exception
-                    ret = process.stdout.read(1); break
-                except Exception as e: continue
+                    if process.stdout.peek(1) is None: 
+                        raise Exception
+                    ret = process.stdout.read(1);
+                    break
+                except Exception as e: 
+                    continue
             accumulation.append(ret)
             if ret is None or ret == b'\n': break
-        try: accumulation = b''.join(accumulation).decode()
-        except Exception as e: accumulation = ''
+        try:
+            accumulation = b''.join(accumulation).decode()
+        except Exception as e: 
+            accumulation = ''
         return accumulation
     
     def write_process(self, process, input):
