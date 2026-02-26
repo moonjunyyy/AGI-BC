@@ -16,16 +16,32 @@ from ..utils.log import get_logger
 _log = get_logger("s2s.omni2")
 
 # ---------------------------------------------------------------------------
-# Known Qwen2 attention configurations
-# hidden_size → (num_attention_heads, num_key_value_heads, head_dim)
-# Used to disambiguate shapes that are identical under different head splits.
+# Known Qwen2 head_dim values keyed by hidden_size.
+#
+# Purpose: resolve the shape ambiguity that arises when q_out == hidden.
+# e.g. hidden=896 satisfies both 7×128 and 14×64 — only the table tells us
+# head_dim=64 for 0.5B.
+#
+# num_heads and kv_heads are ALWAYS derived from the actual checkpoint shapes
+# (q_out // head_dim  and  k_out // head_dim).  The table is NEVER allowed to
+# override those values.
 # ---------------------------------------------------------------------------
-_QWEN2_HEAD_CONFIGS: dict[int, tuple[int, int, int]] = {
-    896:  (14, 2,  64),   # Qwen2-0.5B
-    1536: (12, 2, 128),   # Qwen2-1.5B
-    2048: (16, 8, 128),   # Qwen2 (some variants / Omni2 custom)
-    3584: (28, 4, 128),   # Qwen2-7B
-    7168: (64, 8, 128),   # Qwen2-72B
+_QWEN2_HEAD_DIM: dict[int, int] = {
+    896:  64,    # Qwen2-0.5B  (14 heads × 64)
+    1536: 128,   # Qwen2-1.5B  (12 heads × 128)
+    2048: 128,   # Qwen2 2B-range
+    3584: 128,   # Qwen2-7B    (28 heads × 128)
+    7168: 128,   # Qwen2-72B   (64 heads × 128)
+}
+
+# Whisper encoder: n_head is not directly readable from weight shapes alone
+# (all attn projections are n_state×n_state), so we use a lookup table.
+_WHISPER_N_HEAD: dict[int, int] = {
+    384:  6,   # tiny
+    512:  8,   # base
+    768:  12,  # small
+    1024: 16,  # medium
+    1280: 20,  # large / large-v2 / large-v3
 }
 
 
@@ -204,21 +220,83 @@ class Omni2Model(S2SModel):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _infer_encoder_config(state: dict) -> dict:
+        """Auto-infer WhisperEncoder config from whisper_encoder.safetensors.
+
+        Keys (after 'speech_encoder.' prefix is stripped by convert.py):
+            conv1.weight  [n_state, n_mels, 3]
+            conv2.weight  [n_state, n_state, 3]
+            blocks.N.*
+            ln_post.weight / ln_post.bias
+        """
+        inferred: dict = {}
+
+        if "conv1.weight" in state:
+            n_state, n_mels, _ = state["conv1.weight"].shape
+            inferred["n_state"] = n_state
+            inferred["n_mels"]  = n_mels
+            if n_state in _WHISPER_N_HEAD:
+                inferred["n_head"] = _WHISPER_N_HEAD[n_state]
+
+        layer_ids = {
+            int(m.group(1))
+            for k in state
+            if (m := re.match(r"^blocks\.(\d+)\.", k))
+        }
+        if layer_ids:
+            inferred["n_layer"] = max(layer_ids) + 1
+
+        return inferred
+
+    @staticmethod
+    def _infer_projector_config(state: dict, ds_rate: int = 5) -> dict:
+        """Auto-infer EncoderProjectorConcat config from speech_projector.safetensors.
+
+        Keys (after 'speech_projector.' prefix is stripped):
+            linear1.weight  [2048, encoder_hidden * ds_rate]
+            linear2.weight  [llm_hidden, 2048]
+        """
+        inferred: dict = {}
+
+        if "linear1.weight" in state:
+            _, in_dim = state["linear1.weight"].shape
+            inferred["encoder_hidden"] = in_dim // ds_rate
+
+        if "linear2.weight" in state:
+            llm_hidden, _ = state["linear2.weight"].shape
+            inferred["encoder_hidden_for_lm"] = llm_hidden  # cross-check only
+
+        return inferred
+
+    @staticmethod
     def _resolve_qwen2_heads(
         hidden: int, q_out: int, k_out: int
     ) -> tuple[int, int, int]:
         """Return (num_heads, kv_heads, head_dim) for a Qwen2 layer.
 
-        Consults _QWEN2_HEAD_CONFIGS first (exact match by hidden size),
-        then falls back to trying common head_dim values {128, 64, 256}.
+        Strategy
+        --------
+        1. Look up head_dim from _QWEN2_HEAD_DIM (resolves q_out==hidden ambiguity).
+        2. Fall back to trying {128, 64, 256, 32} until both q_out and k_out divide evenly.
+        3. Compute num_heads = q_out // head_dim  and  kv_heads = k_out // head_dim
+           directly from the actual checkpoint shapes.
+
+        The table is intentionally limited to head_dim; num_heads and kv_heads
+        are always derived from shapes so they reflect the real checkpoint values.
         """
-        if hidden in _QWEN2_HEAD_CONFIGS:
-            return _QWEN2_HEAD_CONFIGS[hidden]
-        for hd in (128, 64, 256, 32):
-            if q_out % hd == 0 and k_out % hd == 0:
-                return q_out // hd, k_out // hd, hd
-        # Last resort: treat full output as one "head"
-        return q_out, k_out, 1
+        # Step 1/2: resolve head_dim
+        head_dim = _QWEN2_HEAD_DIM.get(hidden)
+        if head_dim is None:
+            for hd in (128, 64, 256, 32):
+                if q_out % hd == 0 and k_out % hd == 0:
+                    head_dim = hd
+                    break
+        if head_dim is None:
+            # Last resort: single head
+            return q_out, k_out, 1
+
+        # Step 3: counts always come from actual weight shapes
+        return q_out // head_dim, k_out // head_dim, head_dim
 
     @staticmethod
     def _infer_qwen2_config(state: dict) -> dict:
@@ -435,11 +513,18 @@ class Omni2Model(S2SModel):
         # ── 1. Load checkpoints to CPU and infer configs ──────────────────
         qwen2_path = os.path.join(weights_dir, "qwen2_lm.safetensors")
         gen_path   = os.path.join(weights_dir, "speech_generator.safetensors")
+        enc_path   = os.path.join(weights_dir, "whisper_encoder.safetensors")
+        proj_path  = os.path.join(weights_dir, "speech_projector.safetensors")
 
         qwen2_state: Optional[dict] = None
         gen_state:   Optional[dict] = None
-        inferred_lm:  dict = {}
-        inferred_gen: dict = {}
+        enc_state:   Optional[dict] = None
+        proj_state:  Optional[dict] = None
+
+        inferred_lm:   dict = {}
+        inferred_gen:  dict = {}
+        inferred_enc:  dict = {}
+        inferred_proj: dict = {}
 
         if os.path.exists(qwen2_path):
             _log.info(f"Inspecting {qwen2_path} for Qwen2 config …")
@@ -465,9 +550,49 @@ class Omni2Model(S2SModel):
                 f"vocab={inferred_gen.get('vocab_size')}"
             )
 
+        if os.path.exists(enc_path):
+            _log.info(f"Inspecting {enc_path} for WhisperEncoder config …")
+            enc_state = load_file(enc_path, device="cpu")
+            inferred_enc = cls._infer_encoder_config(enc_state)
+            _log.info(
+                f"Inferred encoder: n_state={inferred_enc.get('n_state')} "
+                f"n_mels={inferred_enc.get('n_mels')} "
+                f"n_layer={inferred_enc.get('n_layer')} "
+                f"n_head={inferred_enc.get('n_head')}"
+            )
+
+        if os.path.exists(proj_path):
+            proj_state = load_file(proj_path, device="cpu")
+            inferred_proj = cls._infer_projector_config(
+                proj_state, ds_rate=config.get("encoder_ds_rate", 5)
+            )
+            _log.info(f"Inferred projector: encoder_hidden={inferred_proj.get('encoder_hidden')}")
+
         # ── 2. Merge configs (inferred < explicit) ─────────────────────────
+        # encoder_config: build from inferred shapes, then overlay explicit overrides
+        base_enc_cfg = {
+            "n_mels":  inferred_enc.get("n_mels",  80),
+            "n_state": inferred_enc.get("n_state", 1280),
+            "n_head":  inferred_enc.get("n_head",  20),
+            "n_layer": inferred_enc.get("n_layer", 32),
+        }
+        base_enc_cfg.update(config.get("encoder_config", {}))
+
+        # encoder_hidden: prefer projector inference, fall back to n_state
+        encoder_hidden = (
+            inferred_proj.get("encoder_hidden")
+            or inferred_enc.get("n_state")
+            or config.get("encoder_hidden", 1280)
+        )
+
         merged_gen = {**inferred_gen, **config.get("generator_config", {})}
-        merged = {**inferred_lm, **{k: v for k, v in config.items() if k != "generator_config"}}
+        merged = {
+            **inferred_lm,
+            **{k: v for k, v in config.items()
+               if k not in ("generator_config", "encoder_config", "encoder_hidden")},
+            "encoder_hidden":  encoder_hidden,
+            "encoder_config":  base_enc_cfg,
+        }
         merged["generator_config"] = merged_gen
 
         # ── 3. Construct model ─────────────────────────────────────────────
@@ -500,15 +625,13 @@ class Omni2Model(S2SModel):
                 _log.warning(f"  first 5 missing: {missing[:5]}")
             del gen_state
 
-        # Remaining components
-        for fname, attr in [
-            ("whisper_encoder.safetensors",  "speech_encoder"),
-            ("speech_projector.safetensors", "speech_projector"),
+        # Remaining components — use already-loaded states to avoid re-reading
+        for state, fname, attr in [
+            (enc_state,  "whisper_encoder.safetensors",  "speech_encoder"),
+            (proj_state, "speech_projector.safetensors", "speech_projector"),
         ]:
-            fpath = os.path.join(weights_dir, fname)
-            if not os.path.exists(fpath):
+            if state is None:
                 continue
-            state = load_file(fpath, device="cpu")
             submod = getattr(model, attr, None)
             if submod is not None:
                 missing, _ = submod.load_state_dict(state, strict=False)
