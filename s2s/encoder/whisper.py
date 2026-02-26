@@ -115,19 +115,35 @@ class WhisperEncoder(nn.Module):
         scaled_time = torch.arange(length)[:, None] * inv_timescales[None, :]
         return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
 
+    def to(self, *args, **kwargs):
+        """Move/cast the encoder, but keep mel_transform permanently in float32.
+
+        model.to(bfloat16) would otherwise cast the torchaudio filterbank buffer
+        to bfloat16, which breaks STFT on many backends.  super().to() is called
+        first so the device is updated correctly; then mel_transform is restored
+        to float32 on that device.
+        """
+        result = super().to(*args, **kwargs)
+        if self.mel_transform is not None:
+            self.mel_transform.float()   # device already set; only reset dtype
+        return result
+
     def audio_to_mel(self, audio: torch.Tensor) -> torch.Tensor:
         """Convert raw audio [B, T] or [B, 1, T] to log-mel [B, n_mels, T_mel]."""
         if self.mel_transform is None:
             raise RuntimeError("torchaudio not available; provide pre-computed mel.")
         if audio.dim() == 3:
             audio = audio.squeeze(1)
-        self.mel_transform.to(torch.float32)
-        _dtype = audio.dtype
-        mel = self.mel_transform(audio.to(torch.float32))
+        # mel_transform is kept in float32 by to() above.
+        # Move audio to the same device as the filterbank and compute in float32.
+        bufs = list(self.mel_transform.buffers())
+        mt_device = bufs[0].device if bufs else audio.device
+        mel = self.mel_transform(audio.to(device=mt_device, dtype=torch.float32))
         log_mel = torch.clamp(mel, min=1e-10).log10()
         log_mel = torch.maximum(log_mel, log_mel.max() - 8.0)
         log_mel = (log_mel + 4.0) / 4.0
-        return log_mel.to(_dtype)
+        # Cast to the model's dtype/device so conv1 receives matching tensors.
+        return log_mel.to(device=self.conv1.weight.device, dtype=self.conv1.weight.dtype)
 
     def forward(self, mel: torch.Tensor) -> torch.Tensor:
         """
