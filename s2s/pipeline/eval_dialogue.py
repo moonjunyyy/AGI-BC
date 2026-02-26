@@ -110,20 +110,40 @@ class KeywordQAEvaluator:
         # Initial audio: silence (80 ms @ 24 kHz = 1920 samples)
         silence = torch.zeros(1, 1, 1920, device=self.device)
         current_audio = silence
+        prev_text: str = ""   # previous turn's decoded text (fallback when no audio)
 
         transcript = []
 
         for turn in range(self.goal.max_turns):
             is_describer = (turn % 2 == 0)
-            role   = "describer" if is_describer else "guesser"
-            prompt = describer_prompt if is_describer else guesser_prompt
+            role = "describer" if is_describer else "guesser"
+
+            # Build the active prompt.
+            # When audio is unavailable (no Mimi decoder) we inject the previous
+            # turn's text into the prompt so the conversation still progresses.
+            if is_describer:
+                base_prompt = describer_prompt
+                # On later describer turns include the guesser's last attempt so
+                # the describer can refine its explanation.
+                active_prompt = (
+                    f"{base_prompt}\n\nThe other player's last response was: "
+                    f'"{prev_text}". Try to make your description clearer.'
+                    if prev_text else base_prompt
+                )
+            else:
+                base_prompt = guesser_prompt
+                # Always give the guesser the describer's words when no audio.
+                active_prompt = (
+                    f'{base_prompt}\n\nThe description you heard was: "{prev_text}"'
+                    if prev_text else base_prompt
+                )
 
             # Run inference
             result = None
             with torch.no_grad():
                 for r in self.model.generate_stream(
                     iter([current_audio]),
-                    text_prompt=prompt,
+                    text_prompt=active_prompt,
                 ):
                     result = r
                     break
@@ -147,6 +167,7 @@ class KeywordQAEvaluator:
                     audio_path = None
 
             transcript.append({"role": role, "text": text, "audio_path": audio_path})
+            prev_text = text
 
             # Check if guesser said the keyword
             if not is_describer and self.goal.keyword.lower() in text.lower():
@@ -158,7 +179,8 @@ class KeywordQAEvaluator:
                     transcript=transcript,
                 )
 
-            # Pass this turn's audio to the next turn
+            # Pass this turn's audio to the next turn (falls back to silence if
+            # Mimi decoder is not loaded — the text fallback above compensates).
             current_audio = audio_out.to(self.device) if audio_out is not None else silence
 
         return KeywordQAResult(

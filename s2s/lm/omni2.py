@@ -441,36 +441,57 @@ class Omni2Model(S2SModel):
         else:
             input_embs = speech_embs
 
-        with torch.no_grad():
-            lm_out = self.language_model(
-                inputs_embeds=input_embs,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-
-        hidden_states = lm_out.hidden_states[-1]
-        _, units_str = self.speech_generator.generate_units(
-            tts_inputs=None,
-            new_hidden_states=hidden_states.squeeze(0),
-            new_tokens=torch.argmax(lm_out.logits.squeeze(0), dim=-1),
-            is_finished=True,
-            max_new_tokens=max_new_tokens,
+        eos_id = (
+            self._tokenizer.eos_token_id
+            if self._tokenizer is not None else None
         )
 
-        audio_out = None
-        mimi = self._get_mimi()
-        if mimi is not None:
-            try:
-                unit_ids = [int(u) for u in units_str.split() if u.isdigit()]
-                if unit_ids:
-                    codes = torch.tensor(
-                        unit_ids, device=audio.device
-                    ).unsqueeze(0).unsqueeze(0)
-                    audio_out = mimi.decode(codes)
-            except Exception:
-                pass
+        with torch.no_grad():
+            gen_out = self.language_model.generate(
+                inputs_embeds=input_embs,
+                max_new_tokens=max_new_tokens,
+                do_sample=(temperature > 0),
+                temperature=max(temperature, 1e-4),
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+                pad_token_id=eos_id if eos_id is not None else 0,
+                eos_token_id=eos_id,
+            )
 
-        yield {"text": units_str, "audio": audio_out}
+        # ── Decode text tokens → human-readable string ────────────────
+        text = ""
+        if self._tokenizer is not None and gen_out.sequences.numel() > 0:
+            text = self._tokenizer.decode(
+                gen_out.sequences[0], skip_special_tokens=True
+            )
+
+        # ── Generate speech units from per-step last-layer hidden states ─
+        audio_out = None
+        if gen_out.hidden_states:
+            # gen_out.hidden_states: tuple[gen_steps] of tuple[layers] of [B,1,H]
+            all_hidden = torch.cat(
+                [step[-1] for step in gen_out.hidden_states], dim=1
+            )  # [B, T_gen, H]
+            _, units_str = self.speech_generator.generate_units(
+                tts_inputs=None,
+                new_hidden_states=all_hidden.squeeze(0),      # [T_gen, H]
+                new_tokens=gen_out.sequences.squeeze(0),      # [T_gen]
+                is_finished=True,
+                max_new_tokens=50,
+            )
+            mimi = self._get_mimi()
+            if mimi is not None:
+                try:
+                    unit_ids = [int(u) for u in units_str.split() if u.isdigit()]
+                    if unit_ids:
+                        codes = torch.tensor(
+                            unit_ids, device=audio.device
+                        ).unsqueeze(0).unsqueeze(0)
+                        audio_out = mimi.decode(codes)
+                except Exception:
+                    pass
+
+        yield {"text": text, "audio": audio_out}
 
     def forward(self, batch: dict) -> dict:
         """Training forward pass."""
