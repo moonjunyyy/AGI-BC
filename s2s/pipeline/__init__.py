@@ -1,2 +1,2 @@
 from .inference import StreamingInferencePipeline
-from .eval_dialogue import DualAgentEvaluator, DialogueGoal, EvalResult
+from .eval_dialogue import KeywordQAEvaluator, KeywordQAGoal, KeywordQAResult

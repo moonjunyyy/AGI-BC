@@ -121,18 +121,13 @@ class WhisperEncoder(nn.Module):
             raise RuntimeError("torchaudio not available; provide pre-computed mel.")
         if audio.dim() == 3:
             audio = audio.squeeze(1)
-        # torchaudio's MelSpectrogram stores a filterbank buffer (fb) that is cast
-        # along with the model when .to(bfloat16 / float16) is called.  Passing
-        # float32 audio into a bfloat16 filterbank triggers a dtype mismatch in the
-        # internal matmul.  Fix: match the audio dtype to the filterbank's dtype.
-        bufs = list(self.mel_transform.buffers())
-        if bufs:
-            audio = audio.to(bufs[0].dtype)
-        mel = self.mel_transform(audio)
+        self.mel_transform.to(torch.float32)
+        _dtype = audio.dtype
+        mel = self.mel_transform(audio.to(torch.float32))
         log_mel = torch.clamp(mel, min=1e-10).log10()
         log_mel = torch.maximum(log_mel, log_mel.max() - 8.0)
         log_mel = (log_mel + 4.0) / 4.0
-        return log_mel
+        return log_mel.to(_dtype)
 
     def forward(self, mel: torch.Tensor) -> torch.Tensor:
         """
