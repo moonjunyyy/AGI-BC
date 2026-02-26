@@ -115,17 +115,18 @@ class WhisperEncoder(nn.Module):
         scaled_time = torch.arange(length)[:, None] * inv_timescales[None, :]
         return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
 
-    def to(self, *args, **kwargs):
-        """Move/cast the encoder, but keep mel_transform permanently in float32.
+    def _apply(self, fn, recurse=True):
+        """Keep mel_transform in float32 regardless of model-level dtype casts.
 
-        model.to(bfloat16) would otherwise cast the torchaudio filterbank buffer
-        to bfloat16, which breaks STFT on many backends.  super().to() is called
-        first so the device is updated correctly; then mel_transform is restored
-        to float32 on that device.
+        PyTorch's Module.to(dtype) calls _apply(fn) recursively; it never calls
+        each submodule's .to() method.  Overriding _apply() here is the only
+        reliable hook: after super()._apply() converts everything (including the
+        torchaudio filterbank buffer), we restore mel_transform to float32.
+        The device placement done by fn is preserved.
         """
-        result = super().to(*args, **kwargs)
+        result = super()._apply(fn, recurse)
         if self.mel_transform is not None:
-            self.mel_transform.float()   # device already set; only reset dtype
+            self.mel_transform.float()   # restore fb to float32; device is correct
         return result
 
     def audio_to_mel(self, audio: torch.Tensor) -> torch.Tensor:
