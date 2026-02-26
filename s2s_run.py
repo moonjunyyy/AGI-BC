@@ -281,38 +281,32 @@ def cmd_webui(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sub-command: eval (dual-agent)
+# Sub-command: eval (keyword Q&A)
 # ---------------------------------------------------------------------------
 
 def _add_eval_args(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser("eval", help="Run dual-agent dialogue evaluation")
+    p = sub.add_parser(
+        "eval",
+        help="Keyword Q&A eval: one agent describes a word, the other guesses it",
+    )
+    # Both agents use the same model
+    _add_common_model_args(p)
+    p.add_argument("--tp-degree", type=int, default=1,
+                   help="Tensor-parallel degree for loading (default: 1)")
 
-    # Agent A
-    p.add_argument("--model-a", type=str, default="omni2", choices=["omni2", "moshi"])
-    p.add_argument("--weights-a", type=str, required=True)
-    p.add_argument("--device-a", type=str, default="cpu")
-    p.add_argument("--dtype-a", type=str, default="float32",
-                   choices=["float32", "float16", "bfloat16"])
-
-    # Agent B
-    p.add_argument("--model-b", type=str, default="moshi", choices=["omni2", "moshi"])
-    p.add_argument("--weights-b", type=str, required=True)
-    p.add_argument("--device-b", type=str, default="cpu")
-    p.add_argument("--dtype-b", type=str, default="float32",
-                   choices=["float32", "float16", "bfloat16"])
-
-    # Dialogue goal
-    p.add_argument("--goal", type=str, required=True,
-                   help="Natural-language description of the dialogue goal")
-    p.add_argument("--keywords", type=str, nargs="*", default=[],
-                   help="Optional keywords that signal goal completion")
-    p.add_argument("--max-turns", type=int, default=20)
-    p.add_argument("--judge-model", type=str, default=None,
-                   help="HF model ID for LLM judge (optional)")
+    # Game config
+    p.add_argument("--keyword", type=str, required=True,
+                   help="The word the describer must describe (without saying it)")
+    p.add_argument("--max-turns", type=int, default=20,
+                   help="Max turns combined (default: 20)")
+    p.add_argument("--describer-prompt", type=str, default="",
+                   help="Override default describer system prompt")
+    p.add_argument("--guesser-prompt", type=str, default="",
+                   help="Override default guesser system prompt")
 
     # Output
     p.add_argument("--output", type=str, default="eval_result.json",
-                   help="Path to write EvalResult JSON")
+                   help="Path to write KeywordQAResult JSON (default: eval_result.json)")
     p.add_argument("--audio-dir", type=str, default="./eval_audio",
                    help="Directory to save per-turn audio files")
     p.set_defaults(func=cmd_eval)
@@ -321,38 +315,28 @@ def _add_eval_args(sub: argparse._SubParsersAction) -> None:
 def cmd_eval(args) -> None:
     import json
     import dataclasses
-    import torch
 
-    from s2s.pipeline.eval_dialogue import DualAgentEvaluator, DialogueGoal
+    from s2s.pipeline.eval_dialogue import KeywordQAEvaluator, KeywordQAGoal
 
-    # Build args namespaces for _load_model
-    def _ns(model, weights, device, dtype):
-        ns = types.SimpleNamespace(model=model, weights=weights, device=device, dtype=dtype)
-        return ns
+    print(f"[eval] Loading model {args.model} from {args.weights}")
+    model = _load_model(args)
 
-    print(f"[eval] Loading agent A: {args.model_a} from {args.weights_a}")
-    model_a = _load_model(_ns(args.model_a, args.weights_a, args.device_a, args.dtype_a))
-
-    print(f"[eval] Loading agent B: {args.model_b} from {args.weights_b}")
-    model_b = _load_model(_ns(args.model_b, args.weights_b, args.device_b, args.dtype_b))
-
-    goal = DialogueGoal(
-        description=args.goal,
-        keywords=args.keywords,
+    goal = KeywordQAGoal(
+        keyword=args.keyword,
         max_turns=args.max_turns,
-        judge_model=args.judge_model,
+        describer_prompt=args.describer_prompt,
+        guesser_prompt=args.guesser_prompt,
     )
 
     os.makedirs(args.audio_dir, exist_ok=True)
-    evaluator = DualAgentEvaluator(model_a, model_b, goal, audio_dir=args.audio_dir)
+    evaluator = KeywordQAEvaluator(model, goal, audio_dir=args.audio_dir, device=args.device)
     result = evaluator.run()
 
-    print(f"\n[eval] Done — {result.turns} turns, reason={result.done_reason}, "
-          f"goal_achieved={result.goal_achieved}")
+    status = f"guessed at turn {result.guessed_at_turn}" if result.guessed else "not guessed"
+    print(f"\n[eval] keyword='{result.keyword}'  {result.turns} turns  {status}")
 
-    result_dict = dataclasses.asdict(result)
     with open(args.output, "w") as f:
-        json.dump(result_dict, f, indent=2, default=str)
+        json.dump(dataclasses.asdict(result), f, indent=2, default=str)
     print(f"[eval] Result saved to {args.output}")
 
 

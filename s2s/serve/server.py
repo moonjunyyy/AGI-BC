@@ -156,31 +156,36 @@ async def generate(file: UploadFile = File(...)):
 
 @app.post("/api/eval")
 async def api_eval(request: Request):
-    """Run dual-agent evaluation using the loaded model for both agents.
+    """Run keyword Q&A evaluation using the loaded model for both roles.
 
-    Body JSON: {goal, keywords?, max_turns?, judge_model?}
-    Returns: EvalResult as dict (turns, transcript, done_reason, goal_achieved)
+    Body JSON:
+        keyword           (required) word to describe and guess
+        max_turns         (optional, default 20)
+        describer_prompt  (optional) override default describer system prompt
+        guesser_prompt    (optional) override default guesser system prompt
+
+    Returns: KeywordQAResult as dict
+        {keyword, turns, guessed, guessed_at_turn, transcript}
     """
     if _model is None:
         return JSONResponse({"error": "model not loaded"}, status_code=503)
 
     import dataclasses
     body = await request.json()
-    goal_text = body.get("goal", "")
-    if not goal_text:
-        return JSONResponse({"error": "goal is required"}, status_code=400)
+    keyword = body.get("keyword", "").strip()
+    if not keyword:
+        return JSONResponse({"error": "'keyword' is required"}, status_code=400)
 
-    from ..pipeline.eval_dialogue import DualAgentEvaluator, DialogueGoal
+    from ..pipeline.eval_dialogue import KeywordQAEvaluator, KeywordQAGoal
 
-    goal = DialogueGoal(
-        description=goal_text,
-        keywords=body.get("keywords", []),
+    goal = KeywordQAGoal(
+        keyword=keyword,
         max_turns=int(body.get("max_turns", 20)),
-        judge_model=body.get("judge_model"),
+        describer_prompt=body.get("describer_prompt", ""),
+        guesser_prompt=body.get("guesser_prompt", ""),
     )
-    # Run in thread pool so the event loop stays responsive
     loop = asyncio.get_event_loop()
-    evaluator = DualAgentEvaluator(_model, _model, goal)
+    evaluator = KeywordQAEvaluator(_model, goal, device=_device)
     result = await loop.run_in_executor(None, evaluator.run)
     return dataclasses.asdict(result)
 

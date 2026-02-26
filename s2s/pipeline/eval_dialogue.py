@@ -1,8 +1,17 @@
 """
-Dual-agent evaluation pipeline for speech-to-speech dialogue.
+Keyword Q&A evaluation pipeline for speech-to-speech models.
+
+One agent (describer) explains a given keyword without saying it;
+the other agent (guesser) tries to name the keyword from the description.
+Both agents use the same model weights (identical model instance).
+
+Full-duplex: the audio output of each turn feeds directly as the audio
+input of the next turn, creating a continuous speech loop.
+
+Success condition: the keyword (case-insensitive) appears in the guesser's
+text output.
 """
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -11,171 +20,151 @@ import torch
 from ..lm.base import S2SModel
 
 
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
 @dataclass
-class DialogueGoal:
-    """Defines the termination condition for a dual-agent dialogue."""
-    description: str
-    keywords: list[str] = field(default_factory=list)
-    max_turns: int = 20
-    judge_model: Optional[str] = None  # HF model ID for LLM judge
+class KeywordQAGoal:
+    """Configuration for a keyword Q&A evaluation run."""
+    keyword: str                      # Target word/concept to describe and guess
+    max_turns: int = 20               # Maximum total turns (describer + guesser)
+    describer_prompt: str = ""        # System prompt for the describer role.
+                                      # Leave empty to use the default.
+    guesser_prompt: str = ""          # System prompt for the guesser role.
+                                      # Leave empty to use the default.
 
 
 @dataclass
-class EvalResult:
-    """Result of a dual-agent evaluation run."""
+class KeywordQAResult:
+    """Result of a keyword Q&A evaluation run."""
+    keyword: str
     turns: int
-    transcript: list[dict]  # [{"role": "A"|"B", "text": str, "audio_path": str|None}]
-    done_reason: str  # "keyword" | "llm_judge" | "max_turns"
-    goal_achieved: bool
+    guessed: bool
+    guessed_at_turn: Optional[int]    # 0-indexed turn index when guessed, or None
+    transcript: list                  # [{"role": "describer"|"guesser", "text": str,
+                                      #   "audio_path": str|None}]
 
 
-class DualAgentEvaluator:
-    """Run a dialogue between two S2S models and evaluate against a goal.
+# ---------------------------------------------------------------------------
+# Evaluator
+# ---------------------------------------------------------------------------
+
+class KeywordQAEvaluator:
+    """Run a keyword Q&A game between two instances of the same S2S model.
+
+    Turn structure (0-indexed):
+        turn 0, 2, 4, ... → describer speaks
+        turn 1, 3, 5, ... → guesser responds
+
+    The describer is primed with a text_prompt asking it to describe the
+    keyword without saying it.  The guesser is primed to identify the word.
+    Both use identical model weights; the role distinction comes solely from
+    the text_prompt injected before the speech input.
 
     Args:
-        model_a: First S2S model (starts the dialogue).
-        model_b: Second S2S model (responds).
-        goal: DialogueGoal defining termination criteria.
-        audio_dir: Directory to save audio files (optional).
-        device: Device string.
+        model:     A single S2SModel instance shared by both roles.
+        goal:      KeywordQAGoal containing the keyword and turn limit.
+        audio_dir: Optional directory to save per-turn audio files.
+        device:    Torch device string.
     """
+
+    _DEFAULT_DESCRIBER = (
+        "You are playing a description game. "
+        "Describe the concept of '{keyword}' clearly and helpfully, "
+        "but do NOT say the word '{keyword}' itself. "
+        "Speak naturally as if describing it to someone who needs to guess it."
+    )
+
+    _DEFAULT_GUESSER = (
+        "You are playing a guessing game. "
+        "Listen carefully to the description and say the single word or concept "
+        "being described. Answer with just the word."
+    )
 
     def __init__(
         self,
-        model_a: S2SModel,
-        model_b: S2SModel,
-        goal: DialogueGoal,
+        model: S2SModel,
+        goal: KeywordQAGoal,
         audio_dir: Optional[str] = None,
-        device: str = "cuda",
+        device: str = "cpu",
     ):
-        self.model_a = model_a
-        self.model_b = model_b
-        self.goal = goal
+        self.model     = model
+        self.goal      = goal
         self.audio_dir = audio_dir
-        self.device = device
+        self.device    = device
         if audio_dir:
             os.makedirs(audio_dir, exist_ok=True)
 
-    def run(self) -> EvalResult:
-        """Execute the dual-agent dialogue loop.
+    def run(self) -> KeywordQAResult:
+        """Execute the keyword Q&A dialogue loop.
 
         Returns:
-            EvalResult with full transcript and termination info.
+            KeywordQAResult with transcript and termination info.
         """
-        transcript = []
-        # Start with a silent audio frame to initialize model A
-        frame_size = 1920  # 80ms @ 24kHz
-        silence = torch.zeros(1, 1, frame_size, device=self.device)
+        # Build role prompts
+        describer_prompt = self.goal.describer_prompt or \
+            self._DEFAULT_DESCRIBER.format(keyword=self.goal.keyword)
+        guesser_prompt = self.goal.guesser_prompt or self._DEFAULT_GUESSER
+
+        # Initial audio: silence (80 ms @ 24 kHz = 1920 samples)
+        silence = torch.zeros(1, 1, 1920, device=self.device)
         current_audio = silence
-        current_model = self.model_a
-        current_role = "A"
-        other_model = self.model_b
+
+        transcript = []
 
         for turn in range(self.goal.max_turns):
-            # Generate response
+            is_describer = (turn % 2 == 0)
+            role   = "describer" if is_describer else "guesser"
+            prompt = describer_prompt if is_describer else guesser_prompt
+
+            # Run inference
             result = None
             with torch.no_grad():
-                for r in current_model.generate_stream(iter([current_audio])):
+                for r in self.model.generate_stream(
+                    iter([current_audio]),
+                    text_prompt=prompt,
+                ):
                     result = r
-                    break  # Take first result
+                    break
 
             if result is None:
                 result = {"text": "", "audio": None}
 
-            text = result.get("text", "")
+            text      = result.get("text", "")
             audio_out = result.get("audio")
 
-            # Save audio if available
+            # Optionally save audio
             audio_path = None
             if audio_out is not None and self.audio_dir:
-                audio_path = os.path.join(self.audio_dir, f"turn_{turn:03d}_{current_role}.wav")
+                audio_path = os.path.join(
+                    self.audio_dir, f"turn_{turn:03d}_{role}.wav"
+                )
                 try:
                     from ..utils.av import save_audio
                     save_audio(audio_out.squeeze(0), audio_path)
                 except Exception:
                     audio_path = None
 
-            transcript.append({"role": current_role, "text": text, "audio_path": audio_path})
+            transcript.append({"role": role, "text": text, "audio_path": audio_path})
 
-            # Check termination
-            done, reason = self._check_goal(transcript)
-            if done:
-                return EvalResult(
+            # Check if guesser said the keyword
+            if not is_describer and self.goal.keyword.lower() in text.lower():
+                return KeywordQAResult(
+                    keyword=self.goal.keyword,
                     turns=turn + 1,
+                    guessed=True,
+                    guessed_at_turn=turn,
                     transcript=transcript,
-                    done_reason=reason,
-                    goal_achieved=(reason != "max_turns"),
                 )
 
-            # Prepare next turn: use generated audio as input to other model
-            if audio_out is not None:
-                current_audio = audio_out.to(self.device)
-            else:
-                current_audio = silence
+            # Pass this turn's audio to the next turn
+            current_audio = audio_out.to(self.device) if audio_out is not None else silence
 
-            # Swap models
-            current_model, other_model = other_model, current_model
-            current_role = "B" if current_role == "A" else "A"
-
-        return EvalResult(
+        return KeywordQAResult(
+            keyword=self.goal.keyword,
             turns=self.goal.max_turns,
+            guessed=False,
+            guessed_at_turn=None,
             transcript=transcript,
-            done_reason="max_turns",
-            goal_achieved=False,
         )
-
-    def _check_goal(self, transcript: list[dict]) -> tuple[bool, str]:
-        """Check if the goal has been achieved.
-
-        Checks in order:
-        1. Keyword match on latest text turn
-        2. LLM judge if judge_model is set
-        3. max_turns fallback (handled by caller)
-
-        Returns:
-            (done: bool, reason: str)
-        """
-        if not transcript:
-            return False, ""
-
-        latest_text = transcript[-1].get("text", "").lower()
-
-        # 1. Keyword match
-        if self.goal.keywords:
-            for kw in self.goal.keywords:
-                if kw.lower() in latest_text:
-                    return True, "keyword"
-
-        # 2. LLM judge
-        if self.goal.judge_model:
-            try:
-                achieved = self._llm_judge(transcript)
-                if achieved:
-                    return True, "llm_judge"
-            except Exception:
-                pass
-
-        return False, ""
-
-    def _llm_judge(self, transcript: list[dict]) -> bool:
-        """Use an LLM to judge whether the dialogue goal was achieved."""
-        try:
-            from transformers import pipeline as hf_pipeline
-            judge = hf_pipeline("text-generation", model=self.goal.judge_model, device=self.device)
-        except Exception:
-            return False
-
-        # Build prompt
-        dialogue_text = "\n".join(
-            f"{t['role']}: {t['text']}" for t in transcript[-6:]  # Last 6 turns
-        )
-        prompt = (
-            f"Goal: {self.goal.description}\n\n"
-            f"Dialogue:\n{dialogue_text}\n\n"
-            "Has the goal been achieved? Answer only 'yes' or 'no':"
-        )
-        try:
-            out = judge(prompt, max_new_tokens=5, do_sample=False)[0]["generated_text"]
-            return "yes" in out.lower()
-        except Exception:
-            return False

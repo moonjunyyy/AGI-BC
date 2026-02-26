@@ -94,20 +94,20 @@ nav button.on{color:#fff;border-bottom-color:#4a9eff}
   <div class="eval-wrap">
     <div class="eval-form">
       <div>
-        <label>Goal description</label>
-        <textarea id="eg" rows="3" placeholder="Reach agreement on a meeting time"></textarea>
-      </div>
-      <div>
-        <label>Keywords (comma-separated, optional)</label>
-        <input id="ek" type="text" placeholder="agreed, confirmed">
+        <label>Keyword to describe / guess</label>
+        <input id="ek" type="text" placeholder="e.g. photosynthesis">
       </div>
       <div>
         <label>Max turns</label>
-        <input id="et" type="number" value="10" min="1" max="200">
+        <input id="et" type="number" value="10" min="2" max="200">
       </div>
       <div>
-        <label>LLM judge model ID (optional)</label>
-        <input id="ej" type="text" placeholder="Qwen/Qwen2-7B-Instruct">
+        <label>Describer prompt (optional override)</label>
+        <textarea id="edp" rows="2" placeholder="Describe '{keyword}' without saying it..."></textarea>
+      </div>
+      <div>
+        <label>Guesser prompt (optional override)</label>
+        <textarea id="egp" rows="2" placeholder="Guess the word being described..."></textarea>
       </div>
       <button id="run-btn" onclick="runEval()">&#9654; Run Evaluation</button>
     </div>
@@ -233,20 +233,20 @@ function stopRec() {
   if (ws && ws.readyState === 1) ws.send('END');
 }
 
-// Dual-agent eval
+// Keyword Q&A eval
 async function runEval() {
-  const goal = document.getElementById('eg').value.trim();
-  if (!goal) { alert('Enter a goal description.'); return; }
+  const keyword = document.getElementById('ek').value.trim();
+  if (!keyword) { alert('Enter a keyword to describe/guess.'); return; }
   const btn = document.getElementById('run-btn');
   btn.disabled = true; btn.textContent = 'Running...';
   document.getElementById('eval-log').innerHTML = '';
   document.getElementById('eval-summary').style.display = 'none';
 
   const body = {
-    goal,
-    keywords: document.getElementById('ek').value.split(',').map(s => s.trim()).filter(Boolean),
+    keyword,
     max_turns: parseInt(document.getElementById('et').value) || 10,
-    judge_model: document.getElementById('ej').value.trim() || null,
+    describer_prompt: document.getElementById('edp').value.trim(),
+    guesser_prompt:   document.getElementById('egp').value.trim(),
   };
 
   try {
@@ -268,7 +268,8 @@ function showEvalResult(data) {
   const log = document.getElementById('eval-log');
   (data.transcript || []).forEach((turn, i) => {
     const d = document.createElement('div');
-    d.className = 'em ' + (turn.role === 'agent_a' ? 'a' : 'b');
+    const isDescriber = turn.role === 'describer';
+    d.className = 'em ' + (isDescriber ? 'a' : 'b');
     d.innerHTML = '<div class="role">' + turn.role + ' &middot; turn ' + (i+1) + '</div>'
                 + (turn.text || '(audio only)');
     log.appendChild(d);
@@ -276,8 +277,11 @@ function showEvalResult(data) {
   log.scrollTop = log.scrollHeight;
   const s = document.getElementById('eval-summary');
   s.style.display = 'block';
-  s.textContent = 'Finished in ' + data.turns + ' turns \u00b7 reason: ' + data.done_reason
-                + ' \u00b7 goal achieved: ' + data.goal_achieved;
+  const guessInfo = data.guessed
+    ? 'guessed at turn ' + (data.guessed_at_turn + 1)
+    : 'not guessed';
+  s.textContent = 'keyword: \u201c' + data.keyword + '\u201d  \u00b7  '
+                + data.turns + ' turns  \u00b7  ' + guessInfo;
 }
 </script>
 </body>
