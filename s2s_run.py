@@ -251,53 +251,33 @@ def cmd_serve(args) -> None:
 # ---------------------------------------------------------------------------
 
 def _add_webui_args(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser("webui", help="Launch the Gradio web UI")
-    p.add_argument("--server-url", type=str, default="ws://localhost:8998",
-                   help="WebSocket URL of the S2S serve backend")
-    p.add_argument("--share", action="store_true",
-                   help="Create a public Gradio link")
-    p.add_argument("--port", type=int, default=7860,
-                   help="Local port for Gradio (default: 7860)")
-
-    # Optional: direct (in-process) mode without a server
-    p.add_argument("--direct", action="store_true",
-                   help="Run model in-process (no server required)")
-    p.add_argument("--model", type=str, default="omni2", choices=["omni2", "moshi"])
-    p.add_argument("--weights", type=str, default=None,
-                   help="Weights directory (required when --direct is set)")
-    p.add_argument("--device", type=str, default="cpu")
-    p.add_argument("--dtype", type=str, default="float32",
-                   choices=["float32", "float16", "bfloat16"])
+    p = sub.add_parser(
+        "webui",
+        help="Load model, start server, and open the browser UI (all-in-one)",
+    )
+    _add_common_model_args(p)
+    p.add_argument("--host", type=str, default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8998)
+    p.add_argument("--no-browser", action="store_true",
+                   help="Do not automatically open a browser tab")
     p.set_defaults(func=cmd_webui)
 
 
 def cmd_webui(args) -> None:
-    server_url = args.server_url
+    import threading
+    import webbrowser
+    import uvicorn
 
-    if args.direct:
-        # Spin up an in-process server on a random port and point the UI at it
-        import threading
-        import uvicorn
+    model = _load_model(args)
+    from s2s.serve.server import set_model, app
+    set_model(model)
 
-        if not args.weights:
-            sys.exit("--weights is required when --direct is set")
+    url = f"http://{args.host}:{args.port}"
+    if not args.no_browser:
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
 
-        model = _load_model(args)
-        from s2s.serve.server import set_model, app
-        set_model(model)
-
-        srv_port = 18998
-        server_url = f"ws://localhost:{srv_port}"
-        t = threading.Thread(
-            target=uvicorn.run,
-            kwargs=dict(app=app, host="127.0.0.1", port=srv_port),
-            daemon=True,
-        )
-        t.start()
-
-    from s2s.serve.webui import create_ui
-    demo = create_ui(server_url=server_url)
-    demo.launch(server_port=args.port, share=args.share)
+    print(f"[webui] Serving at {url}  (Ctrl+C to stop)")
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 # ---------------------------------------------------------------------------

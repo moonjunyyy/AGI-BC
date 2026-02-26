@@ -1,220 +1,301 @@
 """
-Gradio web UI for S2S inference.
+S2S Web UI — pure HTML/JS, no Python UI framework required.
 
-Launch: python -m s2s.serve.webui --server-url ws://localhost:8998
+Registers a single GET / route on the FastAPI app that returns a
+self-contained single-page application.  The SPA communicates with the
+same server via its existing WebSocket and REST endpoints:
+
+    WS  /ws/chat    — bidirectional PCM streaming
+    POST /api/eval  — dual-agent dialogue evaluation
+    GET  /health    — status check
 """
-import argparse
-import queue
-import threading
-import time
-from typing import Optional
+from fastapi import APIRouter
+from fastapi.responses import HTMLResponse
 
-import gradio as gr
-import numpy as np
-import torch
+# ---------------------------------------------------------------------------
+# Single-page application HTML
+# ---------------------------------------------------------------------------
+_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>S2S Interface</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#0f0f0f;color:#e0e0e0;height:100vh;display:flex;flex-direction:column}
+header{padding:10px 18px;border-bottom:1px solid #222;display:flex;align-items:center;gap:12px;flex-shrink:0}
+h1{font-size:.95rem;font-weight:600;color:#fff;margin-right:auto}
+.badge{font-size:.72rem;padding:2px 8px;border-radius:99px;background:#222}
+.badge.ok{background:#1b3b1b;color:#5c5}
+.badge.err{background:#3b1b1b;color:#e55}
+input.url{background:#1a1a1a;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:4px;font-size:.78rem;width:220px}
+button.sm{padding:4px 12px;background:#1a3a5c;border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:.78rem}
+button.sm:hover{background:#234e7a}
+nav{display:flex;border-bottom:1px solid #222;flex-shrink:0}
+nav button{background:none;border:none;border-bottom:2px solid transparent;color:#777;padding:7px 18px;cursor:pointer;font-size:.82rem}
+nav button.on{color:#fff;border-bottom-color:#4a9eff}
+.tab{display:none;flex:1;overflow:hidden;flex-direction:column}
+.tab.on{display:flex}
+
+/* Chat */
+#transcript{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:7px}
+.msg{max-width:68%;padding:8px 11px;border-radius:8px;font-size:.82rem;line-height:1.45;word-break:break-word}
+.msg.u{align-self:flex-end;background:#1a3a5c;color:#cde}
+.msg.m{align-self:flex-start;background:#1e1e1e;border:1px solid #2a2a2a}
+.bar{padding:10px 14px;border-top:1px solid #222;display:flex;align-items:center;gap:10px;flex-shrink:0}
+#rec{width:40px;height:40px;border-radius:50%;border:none;cursor:pointer;font-size:1rem;background:#1a3a5c;color:#fff;transition:background .15s;flex-shrink:0}
+#rec.on{background:#c0392b;animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+#hint{font-size:.76rem;color:#666;flex:1}
+
+/* Eval */
+.eval-wrap{display:flex;flex:1;overflow:hidden}
+.eval-form{width:280px;flex-shrink:0;padding:14px;border-right:1px solid #222;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
+.eval-form label{font-size:.74rem;color:#777;display:block;margin-bottom:3px}
+.eval-form input,.eval-form textarea{width:100%;background:#1a1a1a;border:1px solid #333;color:#ccc;padding:5px 7px;border-radius:4px;font-size:.8rem;font-family:inherit}
+.eval-form textarea{resize:vertical;min-height:56px}
+#run-btn{padding:7px;background:#1b3b1b;border:none;border-radius:4px;color:#5c5;cursor:pointer;font-size:.82rem}
+#run-btn:disabled{opacity:.45;cursor:default}
+.eval-right{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#eval-log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:7px}
+.em{padding:7px 11px;border-radius:8px;font-size:.78rem;line-height:1.4;max-width:68%}
+.em.a{background:#1a3a5c}
+.em.b{background:#3a1a5c;align-self:flex-end}
+.em .role{font-size:.68rem;opacity:.65;font-weight:600;margin-bottom:2px}
+#eval-summary{margin:8px;padding:8px 11px;background:#1b3b1b;border:1px solid #2b5b2b;border-radius:5px;font-size:.78rem;display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>S2S Interface</h1>
+  <span id="badge" class="badge">disconnected</span>
+  <input id="url" class="url" type="text" value="" placeholder="ws://host:port">
+  <button class="sm" onclick="toggleConn()">Connect</button>
+</header>
+<nav>
+  <button class="on" onclick="switchTab('chat',this)">Chat</button>
+  <button onclick="switchTab('eval',this)">Dual-Agent Eval</button>
+</nav>
+
+<!-- Chat tab -->
+<div id="tab-chat" class="tab on">
+  <div id="transcript"></div>
+  <div class="bar">
+    <button id="rec" title="Hold to speak"
+      onmousedown="startRec()" onmouseup="stopRec()"
+      ontouchstart="startRec(event)" ontouchend="stopRec()">&#127897;</button>
+    <span id="hint">Connect to a server, then hold the mic button to speak.</span>
+  </div>
+</div>
+
+<!-- Eval tab -->
+<div id="tab-eval" class="tab">
+  <div class="eval-wrap">
+    <div class="eval-form">
+      <div>
+        <label>Goal description</label>
+        <textarea id="eg" rows="3" placeholder="Reach agreement on a meeting time"></textarea>
+      </div>
+      <div>
+        <label>Keywords (comma-separated, optional)</label>
+        <input id="ek" type="text" placeholder="agreed, confirmed">
+      </div>
+      <div>
+        <label>Max turns</label>
+        <input id="et" type="number" value="10" min="1" max="200">
+      </div>
+      <div>
+        <label>LLM judge model ID (optional)</label>
+        <input id="ej" type="text" placeholder="Qwen/Qwen2-7B-Instruct">
+      </div>
+      <button id="run-btn" onclick="runEval()">&#9654; Run Evaluation</button>
+    </div>
+    <div class="eval-right">
+      <div id="eval-log"></div>
+      <div id="eval-summary"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Tab switching
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('on'));
+  document.getElementById('tab-' + name).classList.add('on');
+  btn.classList.add('on');
+}
+
+// Default URL from current page origin
+(function() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  document.getElementById('url').value = proto + '//' + location.host;
+})();
+
+function wsBase()   { return document.getElementById('url').value.trim(); }
+function httpBase() { return wsBase().replace(/^ws(s?):\/\//, 'http$1://'); }
+function hint(t)    { document.getElementById('hint').textContent = t; }
+
+function addMsg(role, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  d.textContent = text;
+  const tr = document.getElementById('transcript');
+  tr.appendChild(d);
+  tr.scrollTop = tr.scrollHeight;
+}
+
+// WebSocket
+let ws = null, audioCtx = null, nextPlay = 0;
+
+function toggleConn() {
+  if (ws && ws.readyState <= 1) { ws.close(); return; }
+  ws = new WebSocket(wsBase() + '/ws/chat');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    setBadge('connected', true);
+    document.querySelector('header button.sm').textContent = 'Disconnect';
+    hint('Connected. Hold the mic button to speak.');
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    nextPlay = audioCtx.currentTime;
+  };
+  ws.onclose = () => {
+    setBadge('disconnected', false);
+    document.querySelector('header button.sm').textContent = 'Connect';
+    hint('Disconnected.');
+  };
+  ws.onerror = () => setBadge('error', false);
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string') {
+      try { const m = JSON.parse(ev.data); if (m.text) addMsg('m', m.text); } catch(_) {}
+    } else {
+      playPCM(ev.data);
+    }
+  };
+}
+
+function setBadge(text, ok) {
+  const b = document.getElementById('badge');
+  b.textContent = text;
+  b.className = 'badge' + (ok ? ' ok' : ' err');
+}
+
+// PCM playback (Int16 LE, 24 kHz, mono)
+function playPCM(buf) {
+  const i16 = new Int16Array(buf);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+  const ab = audioCtx.createBuffer(1, f32.length, 24000);
+  ab.copyToChannel(f32, 0);
+  const src = audioCtx.createBufferSource();
+  src.buffer = ab;
+  src.connect(audioCtx.destination);
+  const t = Math.max(nextPlay, audioCtx.currentTime + 0.04);
+  src.start(t);
+  nextPlay = t + ab.duration;
+}
+
+// Mic recording — ScriptProcessor captures raw PCM Float32 -> Int16
+let micStream = null, scriptNode = null, recCtx = null;
+
+async function startRec(ev) {
+  if (ev) ev.preventDefault();
+  if (!ws || ws.readyState !== 1) { hint('Not connected.'); return; }
+  document.getElementById('rec').classList.add('on');
+  hint('Recording...');
+  addMsg('u', '[speaking...]');
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { sampleRate: 24000, channelCount: 1, echoCancellation: true }
+  });
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  recCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  const src = recCtx.createMediaStreamSource(micStream);
+  scriptNode = recCtx.createScriptProcessor(2048, 1, 1);
+  scriptNode.onaudioprocess = e => {
+    if (!ws || ws.readyState !== 1) return;
+    const f32 = e.inputBuffer.getChannelData(0);
+    const i16 = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++)
+      i16[i] = Math.max(-32768, Math.min(32767, f32[i] * 32767));
+    ws.send(i16.buffer);
+  };
+  src.connect(scriptNode);
+  scriptNode.connect(recCtx.destination);
+}
+
+function stopRec() {
+  document.getElementById('rec').classList.remove('on');
+  hint('Processing...');
+  if (scriptNode) { scriptNode.disconnect(); scriptNode = null; }
+  if (recCtx)     { recCtx.close(); recCtx = null; }
+  if (micStream)  { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (ws && ws.readyState === 1) ws.send('END');
+}
+
+// Dual-agent eval
+async function runEval() {
+  const goal = document.getElementById('eg').value.trim();
+  if (!goal) { alert('Enter a goal description.'); return; }
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true; btn.textContent = 'Running...';
+  document.getElementById('eval-log').innerHTML = '';
+  document.getElementById('eval-summary').style.display = 'none';
+
+  const body = {
+    goal,
+    keywords: document.getElementById('ek').value.split(',').map(s => s.trim()).filter(Boolean),
+    max_turns: parseInt(document.getElementById('et').value) || 10,
+    judge_model: document.getElementById('ej').value.trim() || null,
+  };
+
+  try {
+    const r = await fetch(httpBase() + '/api/eval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('Server error ' + r.status);
+    showEvalResult(await r.json());
+  } catch (e) {
+    alert('Eval failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Run Evaluation';
+  }
+}
+
+function showEvalResult(data) {
+  const log = document.getElementById('eval-log');
+  (data.transcript || []).forEach((turn, i) => {
+    const d = document.createElement('div');
+    d.className = 'em ' + (turn.role === 'agent_a' ? 'a' : 'b');
+    d.innerHTML = '<div class="role">' + turn.role + ' &middot; turn ' + (i+1) + '</div>'
+                + (turn.text || '(audio only)');
+    log.appendChild(d);
+  });
+  log.scrollTop = log.scrollHeight;
+  const s = document.getElementById('eval-summary');
+  s.style.display = 'block';
+  s.textContent = 'Finished in ' + data.turns + ' turns \u00b7 reason: ' + data.done_reason
+                + ' \u00b7 goal achieved: ' + data.goal_achieved;
+}
+</script>
+</body>
+</html>
+"""
 
 
-def create_ui(server_url: str = "ws://localhost:8998"):
-    """Create and return the Gradio interface."""
-    import websocket as ws_lib  # websocket-client
-    import json
-
-    chat_history = []
-
-    def _connect_and_stream(audio_data, model_choice, temperature, max_tokens, history):
-        """Send audio to server, get text+audio response."""
-        if audio_data is None:
-            return history, None
-
-        sr, samples = audio_data
-        # Convert to 16-bit PCM bytes
-        if samples.dtype != np.int16:
-            samples = (samples * 32767).clip(-32768, 32767).astype(np.int16)
-        pcm_bytes = samples.tobytes()
-
-        # Connect via WebSocket
-        received_text = []
-        received_audio = []
-        done_event = threading.Event()
-
-        ws_url = server_url.replace("http://", "ws://").replace("https://", "wss://")
-        ws_url = ws_url.rstrip("/") + "/ws/chat"
-
-        def on_message(wsapp, msg):
-            if isinstance(msg, bytes):
-                # PCM audio
-                arr = np.frombuffer(msg, dtype=np.int16)
-                received_audio.append(arr)
-            else:
-                try:
-                    data = json.loads(msg)
-                    if data.get("type") == "text":
-                        received_text.append(data.get("text", ""))
-                    elif data.get("error"):
-                        received_text.append(f"[Error: {data['error']}]")
-                except Exception:
-                    pass
-
-        def on_close(wsapp, *args):
-            done_event.set()
-
-        def on_error(wsapp, err):
-            received_text.append(f"[WebSocket error: {err}]")
-            done_event.set()
-
-        wsapp = ws_lib.WebSocketApp(
-            ws_url,
-            on_message=on_message,
-            on_close=on_close,
-            on_error=on_error,
-        )
-
-        def _run():
-            wsapp.run_forever()
-
-        wst = threading.Thread(target=_run, daemon=True)
-        wst.start()
-        time.sleep(0.2)  # Wait for connection
-
-        # Send audio chunks
-        chunk_size = 1920 * 2  # 1920 samples * 2 bytes
-        for offset in range(0, len(pcm_bytes), chunk_size):
-            wsapp.send(pcm_bytes[offset:offset + chunk_size], opcode=ws_lib.ABNF.OPCODE_BINARY)
-
-        # Signal end
-        wsapp.send("END")
-
-        # Wait for response (max 10 seconds)
-        done_event.wait(timeout=10.0)
-        wsapp.close()
-
-        text = " ".join(received_text)
-        history = list(history or [])
-        history.append(("(audio input)", text if text else "(no text response)"))
-
-        # Combine audio
-        audio_out = None
-        if received_audio:
-            combined = np.concatenate(received_audio)
-            audio_out = (24000, combined)
-
-        return history, audio_out
-
-    # -----------------------------------------------------------------------
-    # Direct inference UI (no server required)
-    # -----------------------------------------------------------------------
-
-    def _direct_infer(audio_data, model_choice, temperature, max_tokens, history, model_state):
-        """Direct inference without server."""
-        model = model_state.get("model") if model_state else None
-        if model is None:
-            history = list(history or [])
-            history.append(("(audio)", "[Error: no model loaded. Use server mode or load a model.]"))
-            return history, None, model_state
-
-        if audio_data is None:
-            return history, None, model_state
-
-        sr, samples = audio_data
-        if samples.dtype != np.int16:
-            samples = (samples * 32767).clip(-32768, 32767).astype(np.int16)
-        waveform = torch.from_numpy(samples.astype(np.float32) / 32768.0).unsqueeze(0).unsqueeze(0)
-
-        results = list(model.generate_stream(iter([waveform]), temperature=temperature, max_new_tokens=max_tokens))
-        text = " ".join(r.get("text", "") for r in results)
-        audio_tensors = [r["audio"] for r in results if r.get("audio") is not None]
-
-        history = list(history or [])
-        history.append(("(audio input)", text or "(no text)"))
-
-        audio_out = None
-        if audio_tensors:
-            combined = torch.cat(audio_tensors, dim=-1).squeeze().numpy()
-            combined_i16 = (combined * 32767).clip(-32768, 32767).astype(np.int16)
-            audio_out = (24000, combined_i16)
-
-        return history, audio_out, model_state
-
-    # -----------------------------------------------------------------------
-    # Gradio blocks
-    # -----------------------------------------------------------------------
-
-    with gr.Blocks(title="S2S Web UI") as demo:
-        gr.Markdown("# S2S: Speech-to-Speech Demo")
-        model_state = gr.State({})
-
-        with gr.Tab("Chat"):
-            with gr.Row():
-                with gr.Column():
-                    mic_input = gr.Audio(sources=["microphone"], type="numpy", label="Microphone Input")
-                    model_choice = gr.Dropdown(
-                        choices=["omni2", "moshi"], value="omni2", label="Model"
-                    )
-                    temperature = gr.Slider(0.0, 2.0, value=1.0, step=0.1, label="Temperature")
-                    max_tokens = gr.Slider(64, 1024, value=256, step=64, label="Max New Tokens")
-                    submit_btn = gr.Button("Submit", variant="primary")
-                    use_server = gr.Checkbox(value=True, label="Use server (ws://localhost:8998)")
-                with gr.Column():
-                    chat_box = gr.Chatbot(label="Dialogue")
-                    audio_output = gr.Audio(label="Response Audio", autoplay=True)
-
-            def _submit(audio, choice, temp, maxt, hist, state, use_srv):
-                if use_srv:
-                    hist, audio_out = _connect_and_stream(audio, choice, temp, maxt, hist)
-                    return hist, audio_out, state
-                else:
-                    return _direct_infer(audio, choice, temp, maxt, hist, state)
-
-            submit_btn.click(
-                _submit,
-                inputs=[mic_input, model_choice, temperature, max_tokens, chat_box, model_state, use_server],
-                outputs=[chat_box, audio_output, model_state],
-            )
-
-        with gr.Tab("Dual-Agent Eval"):
-            gr.Markdown("## Dual-Agent Evaluation")
-            with gr.Row():
-                goal_desc = gr.Textbox(label="Goal Description", placeholder="e.g., reach agreement on the best color")
-                keywords = gr.Textbox(label="Keywords (comma-separated)", placeholder="e.g., agree,deal,yes")
-                max_turns = gr.Slider(2, 50, value=10, step=1, label="Max Turns")
-            run_eval_btn = gr.Button("Run Evaluation")
-            eval_output = gr.JSON(label="Evaluation Result")
-
-            def _run_eval(goal_text, kw_text, max_t, state):
-                model = state.get("model") if state else None
-                if model is None:
-                    return {"error": "No model loaded"}, state
-                from ..pipeline.eval_dialogue import DualAgentEvaluator, DialogueGoal
-                keywords_list = [k.strip() for k in kw_text.split(",") if k.strip()]
-                goal = DialogueGoal(description=goal_text, keywords=keywords_list, max_turns=int(max_t))
-                evaluator = DualAgentEvaluator(model, model, goal)  # Same model for both agents
-                result = evaluator.run()
-                return {
-                    "turns": result.turns,
-                    "done_reason": result.done_reason,
-                    "goal_achieved": result.goal_achieved,
-                    "transcript": result.transcript,
-                }, state
-
-            run_eval_btn.click(
-                _run_eval,
-                inputs=[goal_desc, keywords, max_turns, model_state],
-                outputs=[eval_output, model_state],
-            )
-
-    return demo
+# ---------------------------------------------------------------------------
+# FastAPI router
+# ---------------------------------------------------------------------------
+ui_router = APIRouter()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="S2S Web UI")
-    parser.add_argument("--server-url", default="ws://localhost:8998")
-    parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--share", action="store_true")
-    args = parser.parse_args()
-
-    demo = create_ui(server_url=args.server_url)
-    demo.launch(server_port=args.port, share=args.share)
+@ui_router.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def index():
+    return _HTML
 
 
-if __name__ == "__main__":
-    main()
+def mount_ui(app) -> None:
+    """Register the SPA GET / route on an existing FastAPI app."""
+    app.include_router(ui_router)

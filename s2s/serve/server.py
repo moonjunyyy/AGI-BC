@@ -17,7 +17,7 @@ import threading
 from typing import Optional
 
 import torch
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request
 from fastapi.responses import Response, JSONResponse
 
 from ..pipeline.inference import StreamingInferencePipeline
@@ -152,6 +152,42 @@ async def generate(file: UploadFile = File(...)):
         return Response(content=pcm, media_type="audio/pcm")
     finally:
         os.unlink(tmp_path)
+
+
+@app.post("/api/eval")
+async def api_eval(request: Request):
+    """Run dual-agent evaluation using the loaded model for both agents.
+
+    Body JSON: {goal, keywords?, max_turns?, judge_model?}
+    Returns: EvalResult as dict (turns, transcript, done_reason, goal_achieved)
+    """
+    if _model is None:
+        return JSONResponse({"error": "model not loaded"}, status_code=503)
+
+    import dataclasses
+    body = await request.json()
+    goal_text = body.get("goal", "")
+    if not goal_text:
+        return JSONResponse({"error": "goal is required"}, status_code=400)
+
+    from ..pipeline.eval_dialogue import DualAgentEvaluator, DialogueGoal
+
+    goal = DialogueGoal(
+        description=goal_text,
+        keywords=body.get("keywords", []),
+        max_turns=int(body.get("max_turns", 20)),
+        judge_model=body.get("judge_model"),
+    )
+    # Run in thread pool so the event loop stays responsive
+    loop = asyncio.get_event_loop()
+    evaluator = DualAgentEvaluator(_model, _model, goal)
+    result = await loop.run_in_executor(None, evaluator.run)
+    return dataclasses.asdict(result)
+
+
+# Mount the SPA at GET /
+from .webui import mount_ui  # noqa: E402
+mount_ui(app)
 
 
 if __name__ == "__main__":

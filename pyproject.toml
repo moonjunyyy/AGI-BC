@@ -11,16 +11,19 @@ dependencies = [
     "torch>=2.9.0",
     "torchvision>=0.24.0",
     "transformers>=4.57.1",
-    # s2s framework
+    # s2s framework — core (no native extension extras)
     "torchaudio>=2.9.0",
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.34.0",
-    "gradio>=5.0.0",
-    "websockets>=13.0",
-    "websocket-client>=1.8.0",
 ]
 
 [project.optional-dependencies]
+# Web server + Gradio UI (pulls in orjson via gradio — not freethreaded-safe by default)
+# Install with: uv sync --extra serve
+serve = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",          # plain uvicorn; [standard] adds uvloop which is also native
+    "websockets>=13.0",
+    "websocket-client>=1.8.0",
+]
 # One-time weight conversion only — do not import in production
 convert = [
     "transformers>=4.57.1",
