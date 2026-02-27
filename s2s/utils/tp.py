@@ -64,22 +64,39 @@ _EMBED_PATTERNS = [
 
 
 def shard_model(model: nn.Module, tp_degree: int = 1) -> nn.Module:
-    """Apply tensor parallelism to a model.
+    """Apply tensor parallelism to a model (requires torch.distributed to be init'd).
 
-    Maps attention/MLP layers to ShardedLinear:
+    Must be called from inside a worker process where dist.init_process_group()
+    has already been called.  Use TensorParallelPool (s2s/utils/tp_worker.py)
+    to manage the worker processes — it spawns N processes, each calls this
+    function with its own rank, and NCCL handles the all-reduce/all-gather.
+
+    Sharding map:
       col_parallel: q_proj, k_proj, v_proj, gate_proj, up_proj
       row_parallel: o_proj, down_proj
-      embed: embed_tokens
+      embed:        embed_tokens
 
     Args:
-        model: The model to shard.
-        tp_degree: Number of tensor-parallel ranks (used to verify dist is init'd).
+        model:     The model to shard (should be on CPU, weights already loaded).
+        tp_degree: Total number of ranks; used only for the guard below.
 
     Returns:
-        Model with sharded layers.
+        Model with ShardedLinear / ShardedEmbedding layers replacing originals.
     """
-    if tp_degree <= 1 and not _m00nny_available:
+    if tp_degree <= 1:
         return model
+
+    if not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "torch.distributed is not initialised.  "
+            "Call shard_model only from inside a TensorParallelPool worker process."
+        )
+
+    if not _m00nny_available:
+        raise RuntimeError(
+            "m00nny_utils not found; cannot apply tensor parallelism."
+        )
+
     return _convert_to_sharded_module_recursive(
         model,
         embed_parallel_ids=_EMBED_PATTERNS,

@@ -53,33 +53,58 @@ def _add_common_model_args(parser: argparse.ArgumentParser) -> None:
         choices=["float32", "float16", "bfloat16"],
         help="Model dtype (default: float32)",
     )
+    parser.add_argument(
+        "--tp-degree", type=int, default=1,
+        help="Number of GPUs for tensor parallelism (default: 1 = disabled). "
+             "When > 1, spawns N worker processes (one per GPU) that share "
+             "weights via NCCL.  No torchrun required.",
+    )
 
 
-def _load_model(args):
-    """Instantiate and return an S2SModel from CLI args."""
+def _load_model_or_pool(args):
+    """Return a model or TensorParallelPool depending on --tp-degree.
+
+    Both expose generate_stream() so they are interchangeable in the server
+    and eval pipeline.
+    """
+    import json
+    config: dict = {}
+    cfg_path = os.path.join(args.weights, "config.json")
+    if os.path.isfile(cfg_path):
+        with open(cfg_path) as f:
+            config = json.load(f)
+
+    tp = getattr(args, "tp_degree", 1)
+
+    if tp > 1:
+        from s2s.utils.tp_worker import TensorParallelPool
+        print(f"[s2s] Spawning {tp} tensor-parallel worker processes …")
+        return TensorParallelPool(
+            weights_dir=args.weights,
+            config=config,
+            tp_degree=tp,
+            dtype=args.dtype,
+        )
+
     import torch
     from s2s.lm.omni2 import Omni2Model
     from s2s.lm.moshi import MoshiModel
 
     device = args.device
-    dtype = getattr(torch, args.dtype)
-    config: dict = {}  # populated via weights_dir/config.json if present
-
-    # Try loading config from weights dir
-    cfg_path = os.path.join(args.weights, "config.json")
-    if os.path.isfile(cfg_path):
-        import json
-        with open(cfg_path) as f:
-            config = json.load(f)
+    dtype  = getattr(torch, args.dtype)
 
     if args.model == "omni2":
         model = Omni2Model.from_safetensors(args.weights, config, device)
     else:
         model = MoshiModel.from_safetensors(args.weights, config, device)
 
-    model.to(dtype)
-    model.eval()
+    model.to(dtype).eval()
     return model
+
+
+# Keep the old name as an alias for commands that don't need TP
+def _load_model(args):
+    return _load_model_or_pool(args)
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +315,7 @@ def _add_eval_args(sub: argparse._SubParsersAction) -> None:
         help="Keyword Q&A eval: one agent describes a word, the other guesses it",
     )
     # Both agents use the same model
-    _add_common_model_args(p)
-    p.add_argument("--tp-degree", type=int, default=1,
-                   help="Tensor-parallel degree for loading (default: 1)")
+    _add_common_model_args(p)  # includes --tp-degree
 
     # Game config
     p.add_argument("--keyword", type=str, required=True,

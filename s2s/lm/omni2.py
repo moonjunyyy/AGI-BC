@@ -662,6 +662,9 @@ class Omni2Model(S2SModel):
             del state
 
         # ── 6. Tensor parallelism ──────────────────────────────────────────
+        # shard_model() requires torch.distributed to already be initialised.
+        # Call from_safetensors() only from inside a TensorParallelPool worker
+        # (which calls dist.init_process_group before this point).
         if tp_degree > 1:
             from ..utils.tp import shard_model
             model.language_model = shard_model(model.language_model, tp_degree)
