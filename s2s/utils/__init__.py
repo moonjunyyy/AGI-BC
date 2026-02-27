@@ -1,3 +1,5 @@
-from .tp import shard_model, _convert_to_sharded_module_recursive
-from .loader import S2SDataLoader
-from .av import load_audio, save_audio, bytes_to_tensor, tensor_to_bytes
+# Intentionally empty — import submodules directly, e.g.:
+#   from s2s.utils.tp import shard_model
+#   from s2s.utils.tp_worker import TensorParallelPool
+#   from s2s.utils.loader import S2SDataLoader
+#   from s2s.utils.av import load_audio, save_audio
