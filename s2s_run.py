@@ -140,10 +140,6 @@ def _add_train_args(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--dist-master-addr", type=str, default="127.0.0.1")
     p.add_argument("--dist-master-port", type=str, default="29500")
 
-    # Tensor-parallel
-    p.add_argument("--tp-degree", type=int, default=1,
-                   help="Tensor-parallel degree (1 = disabled)")
-
     # Misc
     p.add_argument("--num-workers", type=int, default=4,
                    help="Prefetcher worker threads")
