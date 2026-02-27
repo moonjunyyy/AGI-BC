@@ -620,13 +620,21 @@ class Omni2Model(S2SModel):
         model = cls(merged)
 
         # ── 4. Load tokenizer ──────────────────────────────────────────────
-        if os.path.exists(os.path.join(weights_dir, "tokenizer.json")):
+        tok_dir = config.get("tokenizer_path") or weights_dir
+        if os.path.exists(os.path.join(tok_dir, "tokenizer.json")):
             try:
                 from transformers import AutoTokenizer
-                model._tokenizer = AutoTokenizer.from_pretrained(weights_dir)
-                _log.info("Tokenizer loaded (text_prompt enabled)")
+                model._tokenizer = AutoTokenizer.from_pretrained(tok_dir)
+                _log.info("Tokenizer loaded (text decoding enabled)")
             except Exception as e:
-                _log.warning(f"Tokenizer load failed (text_prompt disabled): {e}")
+                _log.warning(f"Tokenizer load failed: {e}")
+        else:
+            _log.warning(
+                f"tokenizer.json not found in {tok_dir}. "
+                "Text output will be empty. "
+                "Either re-run 'convert omni2' (now copies tokenizer), "
+                "or pass tokenizer_path in config."
+            )
 
         # ── 5. Load weights ────────────────────────────────────────────────
         # Qwen2 LM — fix key prefix stripped by convert.py

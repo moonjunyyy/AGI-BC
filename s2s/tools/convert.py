@@ -128,6 +128,18 @@ def convert_omni2(src: str, dst: str) -> None:
         save_file(speech_gen, str(dst_path / "speech_generator.safetensors"))
         print(f"Saved {len(speech_gen)} tensors → speech_generator.safetensors")
 
+    # Copy tokenizer files so AutoTokenizer.from_pretrained(dst) works
+    import shutil
+    _TOKENIZER_FILES = [
+        "tokenizer.json", "tokenizer_config.json",
+        "special_tokens_map.json", "vocab.json", "merges.txt",
+    ]
+    for fname in _TOKENIZER_FILES:
+        src_file = src_path / fname
+        if src_file.exists():
+            shutil.copy2(str(src_file), str(dst_path / fname))
+            print(f"Copied {fname}")
+
 
 # ---------------------------------------------------------------------------
 # Moshi LM converter

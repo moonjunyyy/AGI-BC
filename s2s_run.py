@@ -55,9 +55,12 @@ def _add_common_model_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--tp-degree", type=int, default=1,
-        help="Number of GPUs for tensor parallelism (default: 1 = disabled). "
-             "When > 1, spawns N worker processes (one per GPU) that share "
-             "weights via NCCL.  No torchrun required.",
+        help="Number of GPUs for tensor parallelism (default: 1 = disabled).",
+    )
+    parser.add_argument(
+        "--tokenizer-path", type=str, default=None,
+        help="Path to tokenizer files if not inside --weights dir. "
+             "Use this if you converted weights before tokenizer copying was added.",
     )
 
 
@@ -70,6 +73,8 @@ def _load_model(args):
     if os.path.isfile(cfg_path):
         with open(cfg_path) as f:
             config = json.load(f)
+    if getattr(args, "tokenizer_path", None):
+        config["tokenizer_path"] = args.tokenizer_path
 
     tp = getattr(args, "tp_degree", 1)
     if tp > 1:
