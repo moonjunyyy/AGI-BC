@@ -156,17 +156,17 @@ def cmd_train(args) -> None:
         world_size=args.world_size,
         global_rank=0,
         dist_backend=args.dist_backend,
-        dist_url="tcp://",
+        dist_url=f"tcp://{args.dist_master_addr}:{args.dist_master_port}",
         dist_master_addr=args.dist_master_addr,
         dist_master_port=args.dist_master_port,
         device=args.device,
         dtype=args.dtype,
         random_seed=args.random_seed,
 
-        # S2STrainer-specific
-        model=args.model,
-        weights=args.weights,
-        data=args.data,
+        # S2STrainer-specific (field names match S2STrainer.build_model / build_dataloader)
+        model_type=args.model,
+        weights_dir=os.path.abspath(args.weights),
+        data_path=args.data,
         val_data=args.val_data,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -188,7 +188,7 @@ def cmd_train(args) -> None:
     if args.world_size > 1:
         mp.spawn(trainer.worker, nprocs=args.world_size, join=True)
     else:
-        trainer.worker(0)
+        trainer.worker(0)  # calls run() for rank 0
 
 
 # ---------------------------------------------------------------------------

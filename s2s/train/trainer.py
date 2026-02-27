@@ -143,7 +143,9 @@ class S2STrainer(_MetaTrainer if _m00nny_available else object):
         out = self.model(batch)
         loss = out["loss"]
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        grad_clip = getattr(self.args, "grad_clip", 1.0)
+        if grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
@@ -157,17 +159,45 @@ class S2STrainer(_MetaTrainer if _m00nny_available else object):
             out = self.model(batch)
         return {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in out.items()}
 
+    def worker(self, rank: int) -> None:
+        """Entry point for each DDP rank (called by mp.spawn or directly for single-GPU).
+
+        Sets up distributed process group when world_size > 1, then delegates to run().
+        """
+        self.global_rank = rank
+        if self.world_size > 1:
+            os.environ["MASTER_ADDR"] = getattr(self.args, "dist_master_addr", "127.0.0.1")
+            os.environ["MASTER_PORT"] = getattr(self.args, "dist_master_port", "29500")
+            dist.init_process_group(
+                backend=getattr(self.args, "dist_backend", "nccl"),
+                rank=rank,
+                world_size=self.world_size,
+            )
+            self.local_rank = rank
+            self.device = torch.device(f"cuda:{rank}")
+        self.run()
+        if self.world_size > 1 and dist.is_initialized():
+            dist.destroy_process_group()
+
     def run(self) -> None:
         """Full training loop."""
         self.model = self.build_model()
         self.dataloader = self.build_dataloader()
 
-        lr = getattr(self.args, "lr", 1e-4)
-        epochs = getattr(self.args, "epochs", 10)
+        lr           = getattr(self.args, "lr",           1e-4)
+        epochs       = getattr(self.args, "epochs",       10)
         warmup_steps = getattr(self.args, "warmup_steps", 100)
-        save_dir = getattr(self.args, "save_dir", "checkpoints")
+        save_dir     = getattr(self.args, "save_dir",     "checkpoints")
+        weight_decay = getattr(self.args, "weight_decay", 0.0)
+        optimizer_name = getattr(self.args, "optimizer", "adamw")
 
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=0.01)
+        _opt_cls = {
+            "adamw":   torch.optim.AdamW,
+            "adam":    torch.optim.Adam,
+            "sgd":     torch.optim.SGD,
+            "rmsprop": torch.optim.RMSprop,
+        }.get(optimizer_name, torch.optim.AdamW)
+        self.optimizer = _opt_cls(self.model.parameters(), lr=lr, weight_decay=weight_decay)
 
         total_steps = epochs * len(self.dataloader)
         if WarmUpCosineAnnelingScheduler is not None:
@@ -175,19 +205,21 @@ class S2STrainer(_MetaTrainer if _m00nny_available else object):
                 self.optimizer, warmup_steps=warmup_steps, total_steps=total_steps
             )
 
+        log_every  = getattr(self.args, "log_every",  100)
+        save_every = getattr(self.args, "save_every", 1)
+
         self.model.train()
         global_step = 0
+        rank = getattr(self, "global_rank", 0)
         for epoch in range(epochs):
             for batch in self.dataloader:
                 loss = self.train_step(batch)
                 global_step += 1
-                if global_step % 100 == 0:
-                    rank = self.global_rank if hasattr(self, "global_rank") else 0
-                    if rank == 0:
-                        print(f"Epoch {epoch} step {global_step} loss {loss.item():.4f}")
+                if global_step % log_every == 0 and rank == 0:
+                    print(f"Epoch {epoch} step {global_step} loss {loss.item():.4f}")
 
             # Save checkpoint
-            if hasattr(self, "global_rank") and self.global_rank == 0:
+            if rank == 0 and (epoch + 1) % save_every == 0:
                 ckpt_path = os.path.join(save_dir, f"epoch_{epoch:03d}.pt")
                 torch.save({"model": self.model.state_dict(), "epoch": epoch}, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")

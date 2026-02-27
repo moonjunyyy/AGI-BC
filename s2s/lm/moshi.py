@@ -263,6 +263,7 @@ class MoshiModel(S2SModel):
         audio_frames: Iterator[torch.Tensor],
         temperature: float = 1.0,
         max_new_tokens: int = 512,
+        text_prompt: Optional[str] = None,  # accepted but unused (Moshi has no text injector)
     ) -> Iterator[dict]:
         frames = list(audio_frames)
         if not frames:

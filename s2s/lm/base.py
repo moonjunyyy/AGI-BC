@@ -17,6 +17,7 @@ class S2SModel(nn.Module, abc.ABC):
         audio_frames: Iterator[torch.Tensor],
         temperature: float = 1.0,
         max_new_tokens: int = 512,
+        text_prompt: Optional[str] = None,
     ) -> Iterator[dict]:
         """Stream inference: consume audio frames, yield {"text": str, "audio": Tensor | None}.
 
@@ -24,6 +25,7 @@ class S2SModel(nn.Module, abc.ABC):
             audio_frames: Iterator of [1, 1, T] audio tensors (one frame at a time).
             temperature: Sampling temperature.
             max_new_tokens: Maximum new tokens to generate.
+            text_prompt: Optional role/instruction text prepended to the input.
 
         Yields:
             Dicts with "text" (str, possibly empty) and "audio" (Tensor [1,1,T] or None).

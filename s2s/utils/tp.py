@@ -2,8 +2,10 @@
 Tensor-parallel helpers wrapping m00nny_utils/parallel/sharded_modules.py.
 
 Worker processes are spawned by spawn_tp_workers().  Each worker initialises
-dist, loads the sharded model, and serves inference requests from its queue.
-The pattern mirrors _MetaTrainer.worker() from m00nny_utils.
+dist, loads the sharded model, then signals "ready" via startup_queue before
+entering the inference loop.  spawn_tp_workers() blocks until ALL workers
+have signalled ready (or raises on the first error), so the returned
+TPWorkers handle is safe to use immediately.
 """
 import os
 import sys
@@ -12,8 +14,6 @@ import threading
 import torch
 import torch.nn as nn
 import torch.multiprocessing as mp
-
-from m00nny_utils.parallel.sharded_modules import _convert_to_sharded_module_recursive
 
 _COL_PARALLEL = [r".*\.q_proj$", r".*\.k_proj$", r".*\.v_proj$",
                  r".*\.gate_proj$", r".*\.up_proj$"]
@@ -27,6 +27,13 @@ def shard_model(model: nn.Module, tp_degree: int = 1) -> nn.Module:
         return model
     if not torch.distributed.is_initialized():
         raise RuntimeError("dist not initialised — call shard_model inside a TP worker")
+    try:
+        from m00nny_utils.parallel.sharded_modules import _convert_to_sharded_module_recursive
+    except ImportError as e:
+        raise ImportError(
+            "m00nny_utils is required for tensor parallelism. "
+            "Install it or set --tp-degree 1."
+        ) from e
     return _convert_to_sharded_module_recursive(
         model,
         embed_parallel_ids=_EMBED,
@@ -36,8 +43,8 @@ def shard_model(model: nn.Module, tp_degree: int = 1) -> nn.Module:
 
 
 def _tp_worker(rank, world_size, model_name, weights_dir, config, dtype_str,
-               rank_queues, output_queue, master_addr, master_port):
-    """Worker entry — called via mp.Process, one per GPU rank."""
+               rank_queues, output_queue, startup_queue, master_addr, master_port):
+    """Worker entry — one per GPU rank.  Signals startup_queue when ready (or on error)."""
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if root not in sys.path:
         sys.path.insert(0, root)
@@ -45,6 +52,7 @@ def _tp_worker(rank, world_size, model_name, weights_dir, config, dtype_str,
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = master_port
     torch.cuda.set_device(rank)
+    device = f"cuda:{rank}"
 
     try:
         torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=world_size)
@@ -56,15 +64,17 @@ def _tp_worker(rank, world_size, model_name, weights_dir, config, dtype_str,
             from s2s.lm.omni2 import Omni2Model
             ModelCls = Omni2Model
 
-        device = f"cuda:{rank}"
-        dtype  = getattr(torch, dtype_str, torch.float32)
-        model  = ModelCls.from_safetensors(weights_dir, config, device=device, tp_degree=world_size)
+        dtype = getattr(torch, dtype_str, torch.float32)
+        model = ModelCls.from_safetensors(weights_dir, config, device=device, tp_degree=world_size)
         model.to(dtype).eval()
+
     except Exception as exc:
         import traceback
-        print(f"[tp_worker rank={rank}] FATAL: {exc}\n{traceback.format_exc()}", flush=True)
-        output_queue.put({"error": str(exc), "text": "", "audio": None})
+        startup_queue.put(("error", rank, f"{exc}\n{traceback.format_exc()}"))
         return
+
+    # Signal ready — main process waits for this before sending any requests
+    startup_queue.put(("ready", rank))
 
     while True:
         item = rank_queues[rank].get()
@@ -84,7 +94,7 @@ def _tp_worker(rank, world_size, model_name, weights_dir, config, dtype_str,
                     break
         except Exception as exc:
             import traceback
-            print(f"[tp_worker rank={rank}] generate_stream error: {exc}\n{traceback.format_exc()}", flush=True)
+            print(f"[tp_worker rank={rank}] generate_stream error:\n{traceback.format_exc()}", flush=True)
             result = {"text": "", "audio": None, "error": str(exc)}
         if rank == 0:
             if result.get("audio") is not None:
@@ -122,18 +132,29 @@ def spawn_tp_workers(model_name: str, weights_dir: str, config: dict, tp_degree:
                      dtype: str = "bfloat16",
                      master_addr: str = "127.0.0.1",
                      master_port: str = "29500") -> TPWorkers:
-    """Spawn N worker processes (one per GPU).  Returns a TPWorkers handle."""
-    ctx          = mp.get_context("spawn")
-    rank_queues  = [ctx.Queue() for _ in range(tp_degree)]
-    output_queue = ctx.Queue()
+    """Spawn N worker processes and wait until all are ready.  Returns a TPWorkers handle."""
+    ctx           = mp.get_context("spawn")
+    rank_queues   = [ctx.Queue() for _ in range(tp_degree)]
+    output_queue  = ctx.Queue()
+    startup_queue = ctx.Queue()
 
     for rank in range(tp_degree):
         p = ctx.Process(
             target=_tp_worker,
             args=(rank, tp_degree, model_name, weights_dir, config, dtype,
-                  rank_queues, output_queue, master_addr, master_port),
+                  rank_queues, output_queue, startup_queue, master_addr, master_port),
             daemon=True,
         )
         p.start()
+
+    # Block until every worker signals ready or one signals error
+    errors = []
+    for _ in range(tp_degree):
+        msg = startup_queue.get()   # blocks
+        if msg[0] == "error":
+            errors.append(f"rank={msg[1]}: {msg[2]}")
+
+    if errors:
+        raise RuntimeError("TP worker(s) failed to initialise:\n" + "\n".join(errors))
 
     return TPWorkers(rank_queues, output_queue)
