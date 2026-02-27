@@ -35,7 +35,7 @@ def shard_model(model: nn.Module, tp_degree: int = 1) -> nn.Module:
     )
 
 
-def _tp_worker(rank, world_size, weights_dir, config, dtype_str,
+def _tp_worker(rank, world_size, model_name, weights_dir, config, dtype_str,
                rank_queues, output_queue, master_addr, master_port):
     """Worker entry — called via mp.Process, one per GPU rank."""
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,13 +45,26 @@ def _tp_worker(rank, world_size, weights_dir, config, dtype_str,
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = master_port
     torch.cuda.set_device(rank)
-    torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-    from s2s.lm.omni2 import Omni2Model
-    device = f"cuda:{rank}"
-    dtype  = getattr(torch, dtype_str, torch.float32)
-    model  = Omni2Model.from_safetensors(weights_dir, config, device=device, tp_degree=world_size)
-    model.to(dtype).eval()
+    try:
+        torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+        if model_name == "moshi":
+            from s2s.lm.moshi import MoshiModel
+            ModelCls = MoshiModel
+        else:
+            from s2s.lm.omni2 import Omni2Model
+            ModelCls = Omni2Model
+
+        device = f"cuda:{rank}"
+        dtype  = getattr(torch, dtype_str, torch.float32)
+        model  = ModelCls.from_safetensors(weights_dir, config, device=device, tp_degree=world_size)
+        model.to(dtype).eval()
+    except Exception as exc:
+        import traceback
+        print(f"[tp_worker rank={rank}] FATAL: {exc}\n{traceback.format_exc()}", flush=True)
+        output_queue.put({"error": str(exc), "text": "", "audio": None})
+        return
 
     while True:
         item = rank_queues[rank].get()
@@ -70,6 +83,8 @@ def _tp_worker(rank, world_size, weights_dir, config, dtype_str,
                     result = r
                     break
         except Exception as exc:
+            import traceback
+            print(f"[tp_worker rank={rank}] generate_stream error: {exc}\n{traceback.format_exc()}", flush=True)
             result = {"text": "", "audio": None, "error": str(exc)}
         if rank == 0:
             if result.get("audio") is not None:
@@ -103,7 +118,7 @@ class TPWorkers:
             q.put(None)
 
 
-def spawn_tp_workers(weights_dir: str, config: dict, tp_degree: int,
+def spawn_tp_workers(model_name: str, weights_dir: str, config: dict, tp_degree: int,
                      dtype: str = "bfloat16",
                      master_addr: str = "127.0.0.1",
                      master_port: str = "29500") -> TPWorkers:
@@ -115,7 +130,7 @@ def spawn_tp_workers(weights_dir: str, config: dict, tp_degree: int,
     for rank in range(tp_degree):
         p = ctx.Process(
             target=_tp_worker,
-            args=(rank, tp_degree, weights_dir, config, dtype,
+            args=(rank, tp_degree, model_name, weights_dir, config, dtype,
                   rank_queues, output_queue, master_addr, master_port),
             daemon=True,
         )

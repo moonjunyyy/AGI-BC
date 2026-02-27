@@ -68,27 +68,31 @@ def _load_model(args):
     import json
     import torch
 
+    # Resolve to absolute paths now — spawned worker processes may have a
+    # different cwd and relative paths would silently fail there.
+    weights_dir = os.path.abspath(args.weights)
+
     config: dict = {}
-    cfg_path = os.path.join(args.weights, "config.json")
+    cfg_path = os.path.join(weights_dir, "config.json")
     if os.path.isfile(cfg_path):
         with open(cfg_path) as f:
             config = json.load(f)
     if getattr(args, "tokenizer_path", None):
-        config["tokenizer_path"] = args.tokenizer_path
+        config["tokenizer_path"] = os.path.abspath(args.tokenizer_path)
 
     tp = getattr(args, "tp_degree", 1)
     if tp > 1:
         from s2s.utils.tp import spawn_tp_workers
         print(f"[s2s] Spawning {tp} tensor-parallel workers …")
-        return spawn_tp_workers(args.weights, config, tp, dtype=args.dtype)  # returns TPWorkers
+        return spawn_tp_workers(args.model, weights_dir, config, tp, dtype=args.dtype)
 
     from s2s.lm.omni2 import Omni2Model
     from s2s.lm.moshi import MoshiModel
 
     if args.model == "omni2":
-        model = Omni2Model.from_safetensors(args.weights, config, args.device)
+        model = Omni2Model.from_safetensors(weights_dir, config, args.device)
     else:
-        model = MoshiModel.from_safetensors(args.weights, config, args.device)
+        model = MoshiModel.from_safetensors(weights_dir, config, args.device)
 
     return model.to(getattr(torch, args.dtype)).eval()
 
