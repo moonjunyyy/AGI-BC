@@ -61,13 +61,10 @@ def _add_common_model_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _load_model_or_pool(args):
-    """Return a model or TensorParallelPool depending on --tp-degree.
-
-    Both expose generate_stream() so they are interchangeable in the server
-    and eval pipeline.
-    """
+def _load_model(args):
     import json
+    import torch
+
     config: dict = {}
     cfg_path = os.path.join(args.weights, "config.json")
     if os.path.isfile(cfg_path):
@@ -75,36 +72,20 @@ def _load_model_or_pool(args):
             config = json.load(f)
 
     tp = getattr(args, "tp_degree", 1)
-
     if tp > 1:
-        from s2s.utils.tp_worker import TensorParallelPool
-        print(f"[s2s] Spawning {tp} tensor-parallel worker processes …")
-        return TensorParallelPool(
-            weights_dir=args.weights,
-            config=config,
-            tp_degree=tp,
-            dtype=args.dtype,
-        )
+        from s2s.utils.tp import spawn_tp_workers
+        print(f"[s2s] Spawning {tp} tensor-parallel workers …")
+        return spawn_tp_workers(args.weights, config, tp, dtype=args.dtype)  # returns TPWorkers
 
-    import torch
     from s2s.lm.omni2 import Omni2Model
     from s2s.lm.moshi import MoshiModel
 
-    device = args.device
-    dtype  = getattr(torch, args.dtype)
-
     if args.model == "omni2":
-        model = Omni2Model.from_safetensors(args.weights, config, device)
+        model = Omni2Model.from_safetensors(args.weights, config, args.device)
     else:
-        model = MoshiModel.from_safetensors(args.weights, config, device)
+        model = MoshiModel.from_safetensors(args.weights, config, args.device)
 
-    model.to(dtype).eval()
-    return model
-
-
-# Keep the old name as an alias for commands that don't need TP
-def _load_model(args):
-    return _load_model_or_pool(args)
+    return model.to(getattr(torch, args.dtype)).eval()
 
 
 # ---------------------------------------------------------------------------

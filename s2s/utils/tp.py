@@ -1,105 +1,124 @@
 """
 Tensor-parallel helpers wrapping m00nny_utils/parallel/sharded_modules.py.
+
+Worker processes are spawned by spawn_tp_workers().  Each worker initialises
+dist, loads the sharded model, and serves inference requests from its queue.
+The pattern mirrors _MetaTrainer.worker() from m00nny_utils.
 """
-import sys
 import os
+import sys
+import threading
 
-# Add m00nny_utils to path if not already available
-_m00nny_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "m00nny_utils")
-if _m00nny_path not in sys.path:
-    sys.path.insert(0, os.path.dirname(_m00nny_path))
-
-import re
 import torch
 import torch.nn as nn
+import torch.multiprocessing as mp
 
-try:
-    from m00nny_utils.parallel.sharded_modules import (
-        ShardedLinear,
-        ShardedEmbedding,
-        shardedConv1D,
-        _convert_to_sharded_module_recursive,
-        convert_to_sharded_module,
-    )
-    _m00nny_available = True
-except ImportError:
-    _m00nny_available = False
-    # Fallback: identity wrappers when m00nny_utils not available
-    class ShardedLinear(nn.Linear):
-        def __init__(self, linear, row_parallel=False):
-            super().__init__(linear.in_features, linear.out_features, bias=linear.bias is not None)
-            self.weight = linear.weight
-            if linear.bias is not None:
-                self.bias = linear.bias
+from m00nny_utils.parallel.sharded_modules import _convert_to_sharded_module_recursive
 
-    class ShardedEmbedding(nn.Embedding):
-        def __init__(self, embedding):
-            super().__init__(embedding.num_embeddings, embedding.embedding_dim)
-            self.weight = embedding.weight
-
-    def _convert_to_sharded_module_recursive(model, **kwargs):
-        return model
-
-    def convert_to_sharded_module(module, **kwargs):
-        pass
-
-
-# Regex patterns for attention/MLP layers
-_ATTN_COL_PATTERNS = [
-    r".*\.q_proj$",
-    r".*\.k_proj$",
-    r".*\.v_proj$",
-    r".*\.gate_proj$",
-    r".*\.up_proj$",
-]
-
-_ATTN_ROW_PATTERNS = [
-    r".*\.o_proj$",
-    r".*\.down_proj$",
-]
-
-_EMBED_PATTERNS = [
-    r".*embed_tokens$",
-]
+_COL_PARALLEL = [r".*\.q_proj$", r".*\.k_proj$", r".*\.v_proj$",
+                 r".*\.gate_proj$", r".*\.up_proj$"]
+_ROW_PARALLEL = [r".*\.o_proj$", r".*\.down_proj$"]
+_EMBED        = [r".*embed_tokens$"]
 
 
 def shard_model(model: nn.Module, tp_degree: int = 1) -> nn.Module:
-    """Apply tensor parallelism to a model (requires torch.distributed to be init'd).
-
-    Must be called from inside a worker process where dist.init_process_group()
-    has already been called.  Use TensorParallelPool (s2s/utils/tp_worker.py)
-    to manage the worker processes — it spawns N processes, each calls this
-    function with its own rank, and NCCL handles the all-reduce/all-gather.
-
-    Sharding map:
-      col_parallel: q_proj, k_proj, v_proj, gate_proj, up_proj
-      row_parallel: o_proj, down_proj
-      embed:        embed_tokens
-
-    Args:
-        model:     The model to shard (should be on CPU, weights already loaded).
-        tp_degree: Total number of ranks; used only for the guard below.
-
-    Returns:
-        Model with ShardedLinear / ShardedEmbedding layers replacing originals.
-    """
+    """Shard model weights across TP ranks.  Requires dist.init_process_group()."""
     if tp_degree <= 1:
         return model
-
     if not torch.distributed.is_initialized():
-        raise RuntimeError(
-            "torch.distributed is not initialised.  "
-            "Call shard_model only from inside a TensorParallelPool worker process."
-        )
-
-    if not _m00nny_available:
-        raise RuntimeError(
-            "m00nny_utils not found; cannot apply tensor parallelism."
-        )
-
+        raise RuntimeError("dist not initialised — call shard_model inside a TP worker")
     return _convert_to_sharded_module_recursive(
         model,
-        embed_parallel_ids=_EMBED_PATTERNS,
-        col_parallel_ids=_ATTN_COL_PATTERNS,
-        row_parallel_ids=_ATTN_ROW_PATTERNS,
+        embed_parallel_ids=_EMBED,
+        col_parallel_ids=_COL_PARALLEL,
+        row_parallel_ids=_ROW_PARALLEL,
     )
+
+
+def _tp_worker(rank, world_size, weights_dir, config, dtype_str,
+               rank_queues, output_queue, master_addr, master_port):
+    """Worker entry — called via mp.Process, one per GPU rank."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = master_port
+    torch.cuda.set_device(rank)
+    torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+    from s2s.lm.omni2 import Omni2Model
+    device = f"cuda:{rank}"
+    dtype  = getattr(torch, dtype_str, torch.float32)
+    model  = Omni2Model.from_safetensors(weights_dir, config, device=device, tp_degree=world_size)
+    model.to(dtype).eval()
+
+    while True:
+        item = rank_queues[rank].get()
+        if item is None:
+            break
+        audio_cpu, text_prompt, max_new_tokens, temperature = item
+        result = {"text": "", "audio": None}
+        try:
+            with torch.no_grad():
+                for r in model.generate_stream(
+                    iter([audio_cpu.to(device)]),
+                    text_prompt=text_prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                ):
+                    result = r
+                    break
+        except Exception as exc:
+            result = {"text": "", "audio": None, "error": str(exc)}
+        if rank == 0:
+            if result.get("audio") is not None:
+                result["audio"] = result["audio"].cpu()
+            output_queue.put(result)
+
+    torch.distributed.destroy_process_group()
+
+
+class TPWorkers:
+    """Thin wrapper around TP worker queues.  Exposes generate_stream() like a model."""
+
+    def __init__(self, rank_queues, output_queue):
+        self._rank_queues  = rank_queues
+        self._output_queue = output_queue
+        self._lock         = threading.Lock()
+
+    def generate_stream(self, audio_frames, text_prompt=None,
+                        max_new_tokens=256, temperature=1.0):
+        frames = list(audio_frames)
+        if not frames:
+            return
+        audio = torch.cat(frames, dim=-1).cpu()
+        with self._lock:
+            for q in self._rank_queues:
+                q.put((audio, text_prompt, max_new_tokens, temperature))
+            yield self._output_queue.get()
+
+    def shutdown(self):
+        for q in self._rank_queues:
+            q.put(None)
+
+
+def spawn_tp_workers(weights_dir: str, config: dict, tp_degree: int,
+                     dtype: str = "bfloat16",
+                     master_addr: str = "127.0.0.1",
+                     master_port: str = "29500") -> TPWorkers:
+    """Spawn N worker processes (one per GPU).  Returns a TPWorkers handle."""
+    ctx          = mp.get_context("spawn")
+    rank_queues  = [ctx.Queue() for _ in range(tp_degree)]
+    output_queue = ctx.Queue()
+
+    for rank in range(tp_degree):
+        p = ctx.Process(
+            target=_tp_worker,
+            args=(rank, tp_degree, weights_dir, config, dtype,
+                  rank_queues, output_queue, master_addr, master_port),
+            daemon=True,
+        )
+        p.start()
+
+    return TPWorkers(rank_queues, output_queue)
