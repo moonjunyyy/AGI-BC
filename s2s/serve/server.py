@@ -144,7 +144,8 @@ async def generate(file: UploadFile = File(...)):
         from ..utils.av import load_audio, tensor_to_bytes
         audio = load_audio(tmp_path).unsqueeze(0).to(_device)
         results = list(_model.generate_stream(iter([audio])))
-        audio_tensors = [r["audio"] for r in results if r.get("audio") is not None]
+        audio_tensors = [r["audio"]
+                         for r in results if r.get("audio") is not None]
         if not audio_tensors:
             return JSONResponse({"error": "no audio generated"}, status_code=500)
         combined = torch.cat(audio_tensors, dim=-1)

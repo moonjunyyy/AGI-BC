@@ -9,7 +9,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-import itertools
 import math
 import typing as tp
 import warnings
@@ -55,7 +54,8 @@ def get_extra_padding_for_conv1d(
     """See `pad_for_conv1d`."""
     length = x.shape[-1]
     n_frames = (length - kernel_size + padding_total) / stride + 1
-    ideal_length = (math.ceil(n_frames) - 1) * stride + (kernel_size - padding_total)
+    ideal_length = (math.ceil(n_frames) - 1) * stride + \
+        (kernel_size - padding_total)
     return ideal_length - length
 
 
@@ -72,7 +72,8 @@ def pad_for_conv1d(
         0 0 1 2 3 4 5 0     # (output of tr. conv., but pos. 5 is going to get removed as padding)
             1 2 3 4         # once you removed padding, we are missing one time step !
     """
-    extra_padding = get_extra_padding_for_conv1d(x, kernel_size, stride, padding_total)
+    extra_padding = get_extra_padding_for_conv1d(
+        x, kernel_size, stride, padding_total)
     return F.pad(x, (0, extra_padding))
 
 
@@ -87,7 +88,8 @@ def pad1d(
     """
     length = x.shape[-1]
     padding_left, padding_right = paddings
-    assert padding_left >= 0 and padding_right >= 0, (padding_left, padding_right)
+    assert padding_left >= 0 and padding_right >= 0, (
+        padding_left, padding_right)
     if mode == "reflect":
         max_pad = max(padding_left, padding_right)
         extra_pad = 0
@@ -104,7 +106,8 @@ def pad1d(
 def unpad1d(x: torch.Tensor, paddings: tp.Tuple[int, int]):
     """Remove padding from x, handling properly zero padding. Only for 1d!"""
     padding_left, padding_right = paddings
-    assert padding_left >= 0 and padding_right >= 0, (padding_left, padding_right)
+    assert padding_left >= 0 and padding_right >= 0, (
+        padding_left, padding_right)
     assert (padding_left + padding_right) <= x.shape[-1]
     end = x.shape[-1] - padding_right
     return x[..., padding_left:end]
@@ -165,8 +168,10 @@ class _StreamingConv1dState(State):
 
     def reset(self, reset_mask: torch.Tensor):
         super().reset(reset_mask)
-        self.previous[:] = torch.where(reset_mask.view(-1, 1, 1), torch.zeros_like(self.previous), self.previous)
-        self.first[:] = torch.where(reset_mask, torch.ones_like(self.first), self.first)
+        self.previous[:] = torch.where(
+            reset_mask.view(-1, 1, 1), torch.zeros_like(self.previous), self.previous)
+        self.first[:] = torch.where(
+            reset_mask, torch.ones_like(self.first), self.first)
 
 
 class StreamingConv1d(StreamingModule[_StreamingConv1dState]):

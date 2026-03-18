@@ -26,7 +26,11 @@ class MultiHeadAttention(nn.Module):
         self.value = nn.Linear(n_state, n_state)
         self.out = nn.Linear(n_state, n_state)
 
-    def forward(self, x: torch.Tensor, mask: tp.Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: tp.Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         B, T, C = x.shape
         scale = (C // self.n_head) ** -0.5
         q = self.query(x).view(B, T, self.n_head, -1).transpose(1, 2)
@@ -62,9 +66,12 @@ class ResidualAttentionBlock(nn.Module):
 class WhisperEncoder(nn.Module):
     """Whisper-style speech encoder.
 
-    Architecture: 2 Conv1d layers + sinusoidal positional encoding + transformer blocks.
-    Input: mel spectrogram [B, n_mels, T_mel]
-    Output: encoded features [B, T_enc, n_state]
+    Architecture:
+        2 Conv1d layers + sinusoidal positional encoding + transformer blocks.
+    Input:
+        mel spectrogram [B, n_mels, T_mel]
+    Output:
+        encoded features [B, T_enc, n_state]
 
     Default config matches Whisper Large-v2:
         n_mels=80, n_state=1280, n_head=20, n_layer=32
@@ -87,9 +94,12 @@ class WhisperEncoder(nn.Module):
         self.n_mels = n_mels
         self.n_state = n_state
         self.conv1 = nn.Conv1d(n_mels, n_state, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
-        self.positional_embedding = nn.Parameter(self._sinusoids(n_ctx, n_state))
-        self.blocks = nn.ModuleList([ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)])
+        self.conv2 = nn.Conv1d(
+            n_state, n_state, kernel_size=3, stride=2, padding=1)
+        self.positional_embedding = nn.Parameter(
+            self._sinusoids(n_ctx, n_state))
+        self.blocks = nn.ModuleList(
+            [ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)])
         self.ln_post = nn.LayerNorm(n_state)
 
         if _torchaudio_available:
@@ -108,38 +118,47 @@ class WhisperEncoder(nn.Module):
             self.mel_transform = None
 
     @staticmethod
-    def _sinusoids(length: int, channels: int, max_timescale: float = 10000.0) -> torch.Tensor:
+    def _sinusoids(
+            length: int,
+            channels: int,
+            max_timescale: float = 10000.0
+    ) -> torch.Tensor:
         assert channels % 2 == 0
         log_timescale_increment = math.log(max_timescale) / (channels // 2 - 1)
-        inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
+        inv_timescales = torch.exp(-log_timescale_increment *
+                                   torch.arange(channels // 2))
         scaled_time = torch.arange(length)[:, None] * inv_timescales[None, :]
         return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
 
     def _apply(self, fn, recurse=True):
-        """Keep mel_transform in float32 regardless of model-level dtype casts.
+        """
+        Keep mel_transform in float32 regardless of model-level dtype casts.
 
-        PyTorch's Module.to(dtype) calls _apply(fn) recursively; it never calls
-        each submodule's .to() method.  Overriding _apply() here is the only
-        reliable hook: after super()._apply() converts everything (including the
-        torchaudio filterbank buffer), we restore mel_transform to float32.
+        PyTorch's Module.to(dtype) calls _apply(fn) recursively;
+            restore mel_transform to float32.
         The device placement done by fn is preserved.
         """
         result = super()._apply(fn, recurse)
         if self.mel_transform is not None:
-            self.mel_transform.float()   # restore fb to float32; device is correct
+            # restore fb to float32; device is correct
+            self.mel_transform.float()
         return result
 
     def audio_to_mel(self, audio: torch.Tensor) -> torch.Tensor:
-        """Convert raw audio [B, T] or [B, 1, T] to log-mel [B, n_mels, T_mel]."""
+        """
+        Convert raw audio [B, T] or [B, 1, T] to log-mel [B, n_mels, T_mel].
+        """
         if self.mel_transform is None:
-            raise RuntimeError("torchaudio not available; provide pre-computed mel.")
+            raise RuntimeError(
+                "torchaudio not available; provide pre-computed mel.")
         if audio.dim() == 3:
             audio = audio.squeeze(1)
         # mel_transform is kept in float32 by to() above.
         # Move audio to the same device as the filterbank and compute in float32.
         bufs = list(self.mel_transform.buffers())
         mt_device = bufs[0].device if bufs else audio.device
-        mel = self.mel_transform(audio.to(device=mt_device, dtype=torch.float32))
+        mel = self.mel_transform(
+            audio.to(device=mt_device, dtype=torch.float32))
         log_mel = torch.clamp(mel, min=1e-10).log10()
         log_mel = torch.maximum(log_mel, log_mel.max() - 8.0)
         log_mel = (log_mel + 4.0) / 4.0
@@ -165,9 +184,15 @@ class WhisperEncoder(nn.Module):
         return x
 
     @classmethod
-    def from_safetensors(cls, weights_dir: str, config: dict, device: str = "cuda") -> "WhisperEncoder":
+    def from_safetensors(
+            cls,
+            weights_dir: str,
+            config: dict,
+            device: str = "cuda"
+    ) -> "WhisperEncoder":
         from safetensors.torch import load_file
-        state = load_file(f"{weights_dir}/whisper_encoder.safetensors", device=device)
+        state = load_file(
+            f"{weights_dir}/whisper_encoder.safetensors", device=device)
         model = cls(**config)
         model.load_state_dict(state, strict=True)
         return model.to(device)

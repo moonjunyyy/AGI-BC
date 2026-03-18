@@ -104,6 +104,7 @@ class StreamingInferencePipeline:
         output_queue: "queue.Queue[dict]",
     ) -> threading.Thread:
         """Run inference in a background thread. Returns the thread."""
-        t = threading.Thread(target=self.run, args=(audio_queue, output_queue), daemon=True)
+        t = threading.Thread(target=self.run, args=(
+            audio_queue, output_queue), daemon=True)
         t.start()
         return t
